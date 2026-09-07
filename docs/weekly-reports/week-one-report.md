@@ -51,8 +51,8 @@ During week 1, the team completed all planned artifacts defined in the project i
 
 ### 4. Repository & ClickUp Evidence
 
-- **GitHub Repository:**
-- **ClickUp Space:**
+- **GitHub Repository:** https://github.com/carltontrevor23/software-engineering-qa-agent.git
+- **ClickUp Space:** https://app.clickup.com/1200440000000401/v/s/1200440000002018
 
 ### 5. Plan for Next Week
 
