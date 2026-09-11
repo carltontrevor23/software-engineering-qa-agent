@@ -1,0 +1,64 @@
+1.	Requirements Specification (${REQUIREMENT_SPEC})
+
+Feature: User Subscription Tier Upgrader
+
+Acceptance Criteria:
+1. The system must fetch current user metadata from an external API endpoint (/users/{user_id}).
+2. If the user's current account balance is greater than or equal to $50.00 and their status is "active", upgrade their tier to "PREMIUM" and deduct $50.00 from their local account ledger file at `/data/ledgers/{user_id}.json`.
+3. If the user's balance is under $50.00, raise a InsufficientFundsError and do not modify the ledger file or upgrade the tier.
+4. If the user status is not "active" (e.g., "suspended", "pending"), raise an InactiveUserError.
+5. If the API returns a non-200 HTTP status code, raise a UserNotFoundError.
+6. All file writes must be written atomically to disk using UTF-8 encoding.
+
+2.	Python Source Code Implementation (${SOURCE_CODE})
+
+import json
+import os
+import requests
+
+class InsufficientFundsError(Exception):
+    pass
+
+class InactiveUserError(Exception):
+    pass
+
+class UserNotFoundError(Exception):
+    pass
+
+class SubscriptionManager:
+    UPGRADE_COST = 50.00
+    API_BASE_URL = "https://api.internal.service/users"
+
+    def __init__(self, ledger_dir: str = "/data/ledgers"):
+        self.ledger_dir = ledger_dir
+
+    def fetch_user_data(self, user_id: str) -> dict:
+        url = f"{self.API_BASE_URL}/{user_id}"
+        response = requests.get(url, timeout=5)
+        if response.status_code != 200:
+            raise UserNotFoundError(f"User {user_id} not found.")
+        return response.json()
+
+    def process_upgrade(self, user_id: str) -> dict:
+        user_data = self.fetch_user_data(user_id)
+
+        if user_data.get("status") != "active":
+            raise InactiveUserError(f"User {user_id} is not active.")
+
+        balance = user_data.get("balance", 0.0)
+        if balance < self.UPGRADE_COST:
+            raise InsufficientFundsError(f"User balance ${balance} is below required threshold.")
+
+        # Update balance and tier
+        new_balance = balance - self.UPGRADE_COST
+        user_data["balance"] = new_balance
+        user_data["tier"] = "PREMIUM"
+
+        # Persist ledger file
+        os.makedirs(self.ledger_dir, exist_ok=True)
+        ledger_path = os.path.join(self.ledger_dir, f"{user_id}.json")
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            json.dump(user_data, f, indent=2)
+
+        return user_data
+
