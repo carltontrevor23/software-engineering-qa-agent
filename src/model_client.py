@@ -29,8 +29,13 @@ import json
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
+import dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency in some envs
+    def load_dotenv(*args, **kwargs):
+        return False
 
-from dotenv import load_dotenv
 from google import genai
 from google.genai import errors as genai_errors
 
@@ -371,13 +376,18 @@ if __name__ == "__main__":
         print("=== Step 2: real test-proposal prompt ===")
         template_path = str(PROJECT_ROOT / "prompts" / "v1.0_test_proposal.txt")
 
-        example_module = "payment_service.calculate_total()"
-        example_requirements = (
-            "Source: docs/requirements/payment.md, section 3.2\n"
-            "'calculate_total() must apply a 10% discount when the cart "
-            "total exceeds 100,000 UGX, and must reject negative quantities "
-            "with a ValueError.'"
-        )
+        # 1. Load your Python file directly from disk into module_description
+        source_code_path = PROJECT_ROOT / "src" / "subscription_manager.py"
+        with open(source_code_path, "r", encoding="utf-8") as f:
+            module_code = f.read()
+            example_module = f"Module: src/subscription_manager.py\n\n{module_code}"
+        
+
+        # Load Requirements from disk
+        requirements_path = PROJECT_ROOT / "docs" / "requirements" / "subscription.md"
+        with open(requirements_path, "r", encoding="utf-8") as f:
+            req_content = f.read()
+        example_requirements = f"Source: docs/requirements/subscription.md, Section 2.1\n\n{req_content}"
 
         full_prompt = build_test_proposal_prompt(
             template_path=template_path,
