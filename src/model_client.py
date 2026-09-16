@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover - optional dependency in some envs
 
 from google import genai
 from google.genai import errors as genai_errors
+from rag import build_rag_pipeline
 
 
 # Setup
@@ -239,6 +240,31 @@ def build_test_proposal_prompt(
     prompt = prompt.replace("{{requirements_excerpt}}", requirements_excerpt)
     return prompt
 
+def build_grounded_prompt(
+    module_description: str,
+    query: str,
+    template_path: str,
+    corpus_dir: str = str(PROJECT_ROOT / "docs" / "requirements"),
+    top_k: int = 3,
+    min_score: float = 1.0,
+) -> str:
+    """
+    Model context construction step (Week 3): retrieves the top-k
+    requirement chunks relevant to `query`, formats them into a cited
+    context block, and inserts that block into the test-proposal
+    prompt alongside module_description.
+    """
+    retriever = build_rag_pipeline(corpus_dir)
+    results = retriever.retrieve(query, top_k=top_k, min_score=min_score)
+    requirements_excerpt = retriever.format_context_for_prompt(results)
+
+
+    return build_test_proposal_prompt(
+        template_path=template_path,
+        module_description=module_description,
+        requirements_excerpt=requirements_excerpt,
+    )
+
 
 
 # Batch evaluation runner (runs all 10 cases in one go)
@@ -381,19 +407,15 @@ if __name__ == "__main__":
         with open(source_code_path, "r", encoding="utf-8") as f:
             module_code = f.read()
             example_module = f"Module: src/subscription_manager.py\n\n{module_code}"
-        
 
-        # Load Requirements from disk
-        requirements_path = PROJECT_ROOT / "docs" / "requirements" / "subscription.md"
-        with open(requirements_path, "r", encoding="utf-8") as f:
-            req_content = f.read()
-        example_requirements = f"Source: docs/requirements/subscription.md, Section 2.1\n\n{req_content}"
-
-        full_prompt = build_test_proposal_prompt(
-            template_path=template_path,
+        # 2. Retrieve + format context, then build the prompt (Week 3 RAG)
+        full_prompt = build_grounded_prompt(
             module_description=example_module,
-            requirements_excerpt=example_requirements,
+            query="tier upgrade balance threshold active status",
+            template_path=template_path,
         )
+
+
 
         try:
             real_reply = get_model_response(full_prompt, prompt_version="v1.0")
