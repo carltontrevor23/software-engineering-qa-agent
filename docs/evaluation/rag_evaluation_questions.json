@@ -1,0 +1,122 @@
+[
+  {
+    "id": 1,
+    "category": "answerable",
+    "question": "What happens to the ledger file when a user with an active, non-FREE subscription cancels?",
+    "grounded_in": "docs/requirements/cancellation.md, Section 2.2, Acceptance Criterion 2",
+    "expected_retrieval": "Strong keyword overlap (cancel, tier, ledger) should surface this chunk as the top BM25 result.",
+    "expected_answer_summary": "Tier is set to FREE and a cancellation timestamp is recorded in the ledger file at /data/ledgers/{user_id}.json."
+  },
+  {
+    "id": 2,
+    "category": "answerable",
+    "question": "How much is credited back to a user's balance when they downgrade from PREMIUM to STANDARD?",
+    "grounded_in": "docs/requirements/downgrade.md, Section 2.3, Acceptance Criterion 3",
+    "expected_retrieval": "Distinctive terms (downgrade, PREMIUM, STANDARD, credit) should retrieve this exact criterion as the top result.",
+    "expected_answer_summary": "$20.00 is credited to the user's local ledger balance."
+  },
+  {
+    "id": 3,
+    "category": "answerable",
+    "question": "Within how many days of a tier upgrade can a user request a refund?",
+    "grounded_in": "docs/requirements/refund.md, Section 2.4, Acceptance Criterion 1",
+    "expected_retrieval": "Distinctive terms (refund, upgrade, days) should retrieve this criterion cleanly.",
+    "expected_answer_summary": "7 days from the original upgrade transaction."
+  },
+  {
+    "id": 4,
+    "category": "answerable",
+    "question": "What error is raised if a user tries to start a free trial after they have already used one?",
+    "grounded_in": "docs/requirements/trial_period.md, Section 2.5, Acceptance Criterion 3",
+    "expected_retrieval": "Distinctive terms (trial, already, used) should retrieve this criterion as the top result.",
+    "expected_answer_summary": "TrialAlreadyUsedError, since a trial_start_date already exists in the ledger file."
+  },
+  {
+    "id": 5,
+    "category": "answerable",
+    "question": "Are tier-change notifications sent when a refund is processed?",
+    "grounded_in": "docs/requirements/notifications.md, Section 2.6, Acceptance Criterion 4",
+    "expected_retrieval": "Distinctive terms (notification, refund) should retrieve this criterion.",
+    "expected_answer_summary": "No. Notifications are not sent for refunds, since a refund reverts a tier change that was already notified."
+  },
+  {
+    "id": 6,
+    "category": "answerable",
+    "question": "If a tier-change notification fails to deliver, is the tier change rolled back?",
+    "grounded_in": "docs/requirements/notifications.md, Section 2.6, Acceptance Criterion 3",
+    "expected_retrieval": "Distinctive terms (notification, fail, tier change) should retrieve this criterion.",
+    "expected_answer_summary": "No. The tier change still succeeds and is not rolled back; the failure is logged as a NotificationDeliveryError for manual review."
+  },
+  {
+    "id": 7,
+    "category": "partially_answerable",
+    "question": "What happens automatically when a user's 14-day trial period ends?",
+    "grounded_in": "docs/requirements/trial_period.md, Section 2.5, Note chunk",
+    "expected_retrieval": "Strong keyword overlap (trial, period, ends) retrieves the document's own Note chunk, not a criterion.",
+    "expected_answer_summary": "Retrieval succeeds and grounds a 'not specified' answer: the document explicitly states this behaviour (auto-downgrade, auto-charge, or left on PREMIUM) is undefined and out of scope until clarified. Answerable only in the sense that the gap itself is documented, not the actual behaviour."
+  },
+  {
+    "id": 8,
+    "category": "partially_answerable",
+    "question": "Can a subscription downgrade be reversed within a grace period?",
+    "grounded_in": "docs/requirements/downgrade.md, Section 2.3, Note chunk",
+    "expected_retrieval": "Strong keyword overlap (downgrade, reversed, grace period) retrieves the document's own Note chunk.",
+    "expected_answer_summary": "Retrieval succeeds and grounds a 'not specified' answer: the document explicitly flags this as an open question for product/requirements clarification, not an actual answer to whether reversal is allowed."
+  },
+  {
+    "id": 9,
+    "category": "partially_answerable",
+    "question": "If a user's account is 20 days old and they've never subscribed, are they eligible for a free trial, and what should happen instead if not?",
+    "grounded_in": "docs/requirements/trial_period.md, Section 2.5, Acceptance Criterion 4 (eligibility only)",
+    "expected_retrieval": "Retrieves the eligibility criterion via shared terms (trial, eligible, account age). No chunk anywhere shares terms with 'what happens instead', since no document addresses a fallback action.",
+    "expected_answer_summary": "The eligibility half is answerable: no, TrialNotEligibleError is raised at 14+ days. What should happen instead is not retrievable from any chunk in the corpus."
+  },
+  {
+    "id": 10,
+    "category": "partially_answerable",
+    "question": "If a user downgrades from PREMIUM to STANDARD, are they notified, and does the downgrade affect the refund eligibility window on their original upgrade?",
+    "grounded_in": "docs/requirements/notifications.md, Section 2.6, Acceptance Criterion 1 (notification only)",
+    "expected_retrieval": "Retrieves the notification criterion via shared terms (downgrade, notification). refund.md shares no terms with 'downgrade', so nothing on the refund-window interaction is retrieved.",
+    "expected_answer_summary": "The notification half is answerable: yes, a downgrade triggers a notification like any tier change. The refund-window interaction is not addressed by any retrievable chunk."
+  },
+  {
+    "id": 11,
+    "category": "partially_answerable",
+    "question": "If a user upgrades and later downgrades before requesting a refund on the original upgrade, is that refund still valid?",
+    "grounded_in": "docs/requirements/refund.md, Section 2.4, Acceptance Criteria 1 and 4 (base eligibility rule only)",
+    "expected_retrieval": "Retrieves refund.md's base eligibility criteria via shared terms (refund, upgrade, 7 days). No chunk in refund.md or downgrade.md shares enough terms to surface anything about an intervening downgrade.",
+    "expected_answer_summary": "The base rule is answerable: eligibility depends on a valid upgrade transaction existing in the ledger within 7 days. Whether an intervening downgrade invalidates that transaction is not retrievable from any chunk."
+  },
+  {
+    "id": 12,
+    "category": "unanswerable",
+    "question": "What is the minimum required password complexity for creating a new account?",
+    "grounded_in": "None. No document mentions passwords, authentication, or account creation.",
+    "expected_retrieval": "No chunk shares meaningful terms with 'password' or 'complexity'; BM25 score should fall below the 1.0 threshold, same as the quantum/blockchain case in test_07_retrieval_unanswerable.",
+    "expected_answer_summary": "Expect the pipeline to return NO_RELEVANT_REQUIREMENTS_FOUND, and the model to state no supporting requirement was found rather than guessing a policy."
+  },
+  {
+    "id": 13,
+    "category": "unanswerable",
+    "question": "What time zone are customer support staff based in?",
+    "grounded_in": "None. No document mentions support staff, staffing, or time zones.",
+    "expected_retrieval": "No shared terms with any chunk beyond generic words like 'the'; BM25 score should fall below threshold.",
+    "expected_answer_summary": "Expect NO_RELEVANT_REQUIREMENTS_FOUND; this topic is entirely outside the corpus's scope of tier-change logic."
+  },
+  {
+    "id": 14,
+    "category": "unanswerable",
+    "question": "Does the service offer a mobile app in addition to the web dashboard?",
+    "grounded_in": "None. No document mentions a mobile app, web dashboard, or any client interface.",
+    "expected_retrieval": "No meaningful shared terms with any chunk; BM25 score should fall below threshold.",
+    "expected_answer_summary": "Expect NO_RELEVANT_REQUIREMENTS_FOUND; the corpus only covers backend tier-change rules, not client interfaces."
+  },
+  {
+    "id": 15,
+    "category": "unanswerable",
+    "question": "What currency conversion rate applies if a user pays in a currency other than UGX or USD?",
+    "grounded_in": "None. All dollar amounts in the corpus are stated as flat figures; no document mentions currency conversion, exchange rates, or UGX at all.",
+    "expected_retrieval": "No meaningful shared terms with any chunk (amounts are given as plain numbers, not currency-conversion rules); BM25 score should fall below threshold.",
+    "expected_answer_summary": "Expect NO_RELEVANT_REQUIREMENTS_FOUND; this introduces a concept (currency conversion) the corpus never addresses."
+  }
+]
