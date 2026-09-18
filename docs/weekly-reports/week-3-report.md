@@ -9,6 +9,8 @@
 The primary objective for Week 3 was to ground model generation in a controlled, traceable knowledge source using a Retrieval-Augmented Generation (RAG) pipeline. All five weekly activities were achieved:
 * **Controlled Corpus Assembly:** Created a version-controlled requirements corpus under `docs/requirements/` (`cancellation.md`, `downgrade.md`, `notifications.md`, `refund.md`, `trial_period.md`, and `subscription.md`) with explicit section labelling and provenance.
 * **Ingestion, Indexing & Retrieval Implementation:** Built an automated ingestion and chunking pipeline in `src/rag.py` using BM25 lexical ranking and strict score thresholds.
+**Figure 1: RAG Architecture — Context Engineering Pipeline**
+![RAG Architecture](../architecture/inspectra.jpeg)
 * **15-Case RAG Evaluation Suite:** Designed and executed a comprehensive 15-question evaluation suite in `docs/evaluation/rag_evaluation_questions.json` spanning Answerable, Partially Answerable, and Deliberately Unanswerable categories.
 * **Failure Analysis:** Investigated, empirically reproduced, and documented three retrieval and grounding failure modes in `docs/evaluation/retrieval_grounding_failures.md`.
 
