@@ -21,6 +21,7 @@ Root Cause: Lexical vs. semantic divergence. The corpus consistently uses the do
 Failure 3: Semantic Granularity & Scope Drift on Undefined Behavior
 Related Test Case: Case 7 & Case 8 (Partially Answerable / Explicit Note Chunks)
 Question: "What happens automatically when a user's 14-day trial period ends?"
+
 Observed Behaviour:
 Retrieval Phase: Successfully retrieved docs/requirements/trial_period.md, Section 2.5, Note chunk (which states that auto-downgrade vs. auto-billing is undefined and out of scope).
 
