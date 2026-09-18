@@ -1,0 +1,437 @@
+[
+  {
+    "id": 1,
+    "category": "answerable",
+    "question": "What happens to the ledger file when a user with an active, non-FREE subscription cancels?",
+    "expected_answer_summary": "Tier is set to FREE and a cancellation timestamp is recorded in the ledger file at /data/ledgers/{user_id}.json.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 10.182
+      },
+      {
+        "chunk_id": "cancellation.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/cancellation.md",
+        "section": "Section 2.2: Subscription Cancellation",
+        "score": 8.243
+      },
+      {
+        "chunk_id": "cancellation.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/cancellation.md",
+        "section": "Section 2.2: Subscription Cancellation",
+        "score": 7.177
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "Answer: The system sets the user's tier to \"FREE\" and records a cancellation timestamp in the local account ledger file at `/data/ledgers/{user_id}.json`.\nGrounded In: docs/requirements/cancellation.md, Section 2.2: Subscription Cancellation",
+    "status": "completed"
+  },
+  {
+    "id": 2,
+    "category": "answerable",
+    "question": "How much is credited back to a user's balance when they downgrade from PREMIUM to STANDARD?",
+    "expected_answer_summary": "$20.00 is credited to the user's local ledger balance.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "downgrade.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 15.923
+      },
+      {
+        "chunk_id": "downgrade.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 13.436
+      },
+      {
+        "chunk_id": "downgrade.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 10.015
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "Answer: When a user with an \"active\" status downgrades from tier \"PREMIUM\" to tier \"STANDARD\", $20.00 is credited back to the user's local ledger balance.\nGrounded In: docs/requirements/downgrade.md, Section 2.3: Subscription Tier Downgrade",
+    "status": "completed"
+  },
+  {
+    "id": 3,
+    "category": "answerable",
+    "question": "Within how many days of a tier upgrade can a user request a refund?",
+    "expected_answer_summary": "7 days from the original upgrade transaction.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 11.779
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 8.662
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 8.491
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "Answer: A user can request a refund for a tier upgrade within 7 days of completing the upgrade.\nGrounded In: docs/requirements/refund.md, Section 2.4: Refund Processing",
+    "status": "completed"
+  },
+  {
+    "id": 4,
+    "category": "answerable",
+    "question": "What error is raised if a user tries to start a free trial after they have already used one?",
+    "expected_answer_summary": "TrialAlreadyUsedError, since a trial_start_date already exists in the ledger file.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 18.56
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 11.335
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 10.392
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 8.877760519s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 5,
+    "category": "answerable",
+    "question": "Are tier-change notifications sent when a refund is processed?",
+    "expected_answer_summary": "No. Notifications are not sent for refunds, since a refund reverts a tier change that was already notified.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "notifications.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/notifications.md",
+        "section": "Section 2.6: Notification Delivery",
+        "score": 12.122
+      },
+      {
+        "chunk_id": "notifications.md#secSection 2.#ac-5",
+        "source_file": "docs/requirements/notifications.md",
+        "section": "Section 2.6: Notification Delivery",
+        "score": 9.18
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-5",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 6.86
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 1.662733358s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 6,
+    "category": "answerable",
+    "question": "If a tier-change notification fails to deliver, is the tier change rolled back?",
+    "expected_answer_summary": "No. The tier change still succeeds and is not rolled back; the failure is logged as a NotificationDeliveryError for manual review.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "notifications.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/notifications.md",
+        "section": "Section 2.6: Notification Delivery",
+        "score": 18.93
+      },
+      {
+        "chunk_id": "notifications.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/notifications.md",
+        "section": "Section 2.6: Notification Delivery",
+        "score": 12.048
+      },
+      {
+        "chunk_id": "notifications.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/notifications.md",
+        "section": "Section 2.6: Notification Delivery",
+        "score": 11.056
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 55.509558126s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 7,
+    "category": "partially_answerable",
+    "question": "What happens automatically when a user's 14-day trial period ends?",
+    "expected_answer_summary": "Retrieval succeeds and grounds a 'not specified' answer: the document explicitly states this behaviour (auto-downgrade, auto-charge, or left on PREMIUM) is undefined and out of scope until clarified. Answerable only in the sense that the gap itself is documented, not the actual behaviour.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 17.18
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 9.621
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 9.251
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 50.076405244s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 8,
+    "category": "partially_answerable",
+    "question": "Can a subscription downgrade be reversed within a grace period?",
+    "expected_answer_summary": "Retrieval succeeds and grounds a 'not specified' answer: the document explicitly flags this as an open question for product/requirements clarification, not an actual answer to whether reversal is allowed.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "downgrade.md#secSection 2.#note",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 14.931
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 5.401
+      },
+      {
+        "chunk_id": "downgrade.md#secSection 2.#ac-6",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 4.935
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 44.310850199s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 9,
+    "category": "partially_answerable",
+    "question": "If a user's account is 20 days old and they've never subscribed, are they eligible for a free trial, and what should happen instead if not?",
+    "expected_answer_summary": "The eligibility half is answerable: no, TrialNotEligibleError is raised at 14+ days. What should happen instead is not retrievable from any chunk in the corpus.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 18.561
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 18.015
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 15.025
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 38.606866587s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 10,
+    "category": "partially_answerable",
+    "question": "If a user downgrades from PREMIUM to STANDARD, are they notified, and does the downgrade affect the refund eligibility window on their original upgrade?",
+    "expected_answer_summary": "The notification half is answerable: yes, a downgrade triggers a notification like any tier change. The refund-window interaction is not addressed by any retrievable chunk.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "downgrade.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 13.77
+      },
+      {
+        "chunk_id": "downgrade.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/downgrade.md",
+        "section": "Section 2.3: Subscription Tier Downgrade",
+        "score": 12.032
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 11.57
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 32.602249571s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 11,
+    "category": "partially_answerable",
+    "question": "If a user upgrades and later downgrades before requesting a refund on the original upgrade, is that refund still valid?",
+    "expected_answer_summary": "The base rule is answerable: eligibility depends on a valid upgrade transaction existing in the ledger within 7 days. Whether an intervening downgrade invalidates that transaction is not retrievable from any chunk.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 14.852
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 12.432
+      },
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 10.569
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 27.039880817s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 12,
+    "category": "unanswerable",
+    "question": "What is the minimum required password complexity for creating a new account?",
+    "expected_answer_summary": "Expect the pipeline to return NO_RELEVANT_REQUIREMENTS_FOUND, and the model to state no supporting requirement was found rather than guessing a policy.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 7.931
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 7.101
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 4.54
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 20.945722675s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 13,
+    "category": "unanswerable",
+    "question": "What time zone are customer support staff based in?",
+    "expected_answer_summary": "Expect NO_RELEVANT_REQUIREMENTS_FOUND; this topic is entirely outside the corpus's scope of tier-change logic.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "cancellation.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/cancellation.md",
+        "section": "Section 2.2: Subscription Cancellation",
+        "score": 3.773
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 3.142
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 2.638
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 14.920525045s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 14,
+    "category": "unanswerable",
+    "question": "Does the service offer a mobile app in addition to the web dashboard?",
+    "expected_answer_summary": "Expect NO_RELEVANT_REQUIREMENTS_FOUND; the corpus only covers backend tier-change rules, not client interfaces.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 4.215
+      },
+      {
+        "chunk_id": "cancellation.md#secSection 2.#ac-2",
+        "source_file": "docs/requirements/cancellation.md",
+        "section": "Section 2.2: Subscription Cancellation",
+        "score": 4.074
+      },
+      {
+        "chunk_id": "notifications.md#secSection 2.#ac-1",
+        "source_file": "docs/requirements/notifications.md",
+        "section": "Section 2.6: Notification Delivery",
+        "score": 3.974
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 9.392700221s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  },
+  {
+    "id": 15,
+    "category": "unanswerable",
+    "question": "What currency conversion rate applies if a user pays in a currency other than UGX or USD?",
+    "expected_answer_summary": "Expect NO_RELEVANT_REQUIREMENTS_FOUND; this introduces a concept (currency conversion) the corpus never addresses.",
+    "retrieved_chunks": [
+      {
+        "chunk_id": "refund.md#secSection 2.#ac-4",
+        "source_file": "docs/requirements/refund.md",
+        "section": "Section 2.4: Refund Processing",
+        "score": 6.109
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#note",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 5.133
+      },
+      {
+        "chunk_id": "trial_period.md#secSection 2.#ac-3",
+        "source_file": "docs/requirements/trial_period.md",
+        "section": "Section 2.5: Trial Period Management",
+        "score": 4.832
+      }
+    ],
+    "retrieval_hit": true,
+    "actual_behaviour": "[CALL FAILED] Model call failed with an unexpected error: Error code: 429 - {'error': {'message': 'You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, model: gemini-3.6-flash\\nPlease retry in 3.812737528s.', 'code': 'too_many_requests'}}",
+    "status": "error"
+  }
+]
