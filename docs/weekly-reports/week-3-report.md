@@ -38,7 +38,7 @@ The primary objective for Week 3 was to ground model generation in a controlled,
 ---
 
 ### 5. Individual Contribution Summary
-* **[Praise Assimire] Corpus Curation & Provenance:** Authored and formatted the controlled specification documents with section IDs, acceptance criteria, and explicit open-scope notes. *Evidence: (`docs/requirements/cancellation.md`, `downgrade.md`, `notification.md`, `refund.md`, `trial_period.md`)*
+* **[Praise Asiimire] Corpus Curation & Provenance:** Authored and formatted the controlled specification documents with section IDs, acceptance criteria, and explicit open-scope notes. *Evidence: (`docs/requirements/cancellation.md`, `downgrade.md`, `notification.md`, `refund.md`, `trial_period.md`)*
 * **[Carlton Ayebare] Pipeline & Indexing Implementation:** Developed core segmenting, indexing, and BM25 search mechanics. *Evidence: `src/rag.py` and unit tests in `tests/test_rag.py`.*
 * **[Ednah Kirabo] Prompt Engineering & Evaluation Design:** Constructed model context from retrieved evidence and showed sources in the response. *Evidence: changes in `src/model.py`.*
 * **[Modest Nakiroya] Prompt Engineering & Evaluation Design:** Authored `prompts/rag_answer_prompt_v1.0.txt` and constructed the 15-case question matrix. *Evidence: `prompts/rag_answer_prompt_v1.0.txt`, `docs/evaluation/rag_evaluation_questions.json`.*
