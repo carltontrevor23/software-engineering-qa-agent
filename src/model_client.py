@@ -1,26 +1,6 @@
 """
-model_client.py
-
-Baseline model integration for the Software-Engineering QA Agent.
-
-This module's core job is still simple: send a prompt to Gemini and
-return the text response. No RAG, no tools, no agent loop yet — those
-come in later weeks. On top of that it now also handles:
-
-  - API failures gracefully (rate limits, bad key, network issues)
-    instead of crashing with a raw traceback.
-  - Running a whole batch of evaluation cases in one go, instead of
-    calling get_model_response() by hand for each of the 10 cases.
-
-Usage (quick manual connection test):
-    python src/model_client.py
-
-Usage (run all 10 evaluation cases and save results):
-    python src/model_client.py --run-evaluation
-
-Usage (import into other code, e.g. a future tools/agent layer):
-    from model_client import get_model_response
-    reply = get_model_response("Say hello in one sentence.")
+model_client.py — Sends a prompt to Gemini via LangChain, with
+retry/error handling and batch evaluation. Usage: python src/model_client.py [--run-evaluation]
 """
 
 import os
@@ -30,15 +10,14 @@ import time
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-import dotenv
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - optional dependency in some envs
     def load_dotenv(*args, **kwargs):
         return False
 
-from google import genai
-from google.genai import errors as genai_errors
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage
 from rag import build_rag_pipeline
 
 
@@ -56,7 +35,9 @@ if not API_KEY:
         "root with a line like: GEMINI_API_KEY=your_key_here"
     )
 
-client = genai.Client(api_key=API_KEY)
+# Shared LangChain chat model for plain (non-tool-calling) prompts.
+# agent.py binds its own tools instance rather than reusing this one.
+llm = ChatGoogleGenerativeAI(model=MODEL_NAME, google_api_key=API_KEY)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRACES_DIR = PROJECT_ROOT / "evidence" / "traces"
@@ -65,11 +46,8 @@ TRACES_DIR.mkdir(parents=True, exist_ok=True)
 
 # Custom exception
 class ModelCallError(Exception):
-    """
-    Raised when a call to the model fails after retries, for a reason
-    the caller should know about (rate limit, auth failure, network
-    issue, etc.) rather than an unhandled crash.
-    """
+    """Raised when a call to the model fails after retries (rate limit,
+    auth failure, network issue, etc.)."""
     def __init__(self, message: str, cause: Exception | None = None):
         super().__init__(message)
         self.cause = cause
@@ -82,47 +60,14 @@ def get_model_response(
     prompt_version: str = "unversioned",
     max_retries: int = 3,
 ) -> str:
-    """
-    Send a prompt to Gemini and return the text response.
-
-    Every call — successful or failed — is logged to evidence/traces/
-    with a timestamp, the prompt version label, the full prompt sent,
-    and either the response or the error. This is the evidence trail
-    required by the project brief (US-10: every agent action must be
-    logged and traceable, including refusals/failures).
-
-    On failure (rate limit, bad key, network issue, etc.), this
-    retries a small number of times with a short pause, then raises
-    ModelCallError with a clear message instead of letting the raw
-    SDK traceback crash the whole script. Callers (e.g. the batch
-    evaluation runner) can catch ModelCallError per-case so one
-    failed case doesn't kill the other nine.
-
-    Args:
-        prompt: The full, already-assembled prompt text to send.
-        prompt_version: A label like "v1.0" or "v1.1", used only for
-            logging so you can trace which prompt spec produced which
-            output. Does not affect the API call itself.
-        max_retries: How many extra attempts to make after the first
-            failed call, before giving up. Default 2 (3 attempts total).
-
-    Returns:
-        The model's text response as a string.
-
-    Raises:
-        ModelCallError: if the call fails on every attempt.
-    """
-    import time
-
+    """Sends a prompt to Gemini and returns the text response. Logs
+    every call, retries rate limits, and raises ModelCallError on failure."""
     last_error: Exception | None = None
 
     for attempt in range(1, max_retries + 2):  # e.g. max_retries=3 -> 4 attempts
         try:
-            interaction = client.interactions.create(
-                model=MODEL_NAME,
-                input=prompt,
-            )
-            reply_text = interaction.output_text
+            ai_message = llm.invoke([HumanMessage(content=prompt)])
+            reply_text = ai_message.content
 
             _log_call(
                 prompt=prompt,
@@ -132,38 +77,28 @@ def get_model_response(
             )
             return reply_text
 
-        except genai_errors.APIError as e:  # base class — catches ClientError and ServerError both
-            last_error = e
-            err_msg = str(e).lower()
-            status_code = getattr(e, "code", None)
-
-            # Handle 429 Too Many Requests (Rate Limits / RPM ceilings)
-            if status_code == 429 or "429" in err_msg or "too_many_requests" in err_msg or "quota exceeded" in err_msg:
-                if attempt <= max_retries:
-                    wait_seconds = 65  # safely past the 60s sliding RPM window
-                    print(
-                        f"[model_client] Rate limited (429), pausing for {wait_seconds}s "
-                        f"before retry {attempt}/{max_retries}...",
-                        file=sys.stderr,
-                    )
-                    time.sleep(wait_seconds)
-                    continue
-
-            # Non-429 client/server errors are unrecoverable
-            _log_call(
-                prompt=prompt,
-                prompt_version=prompt_version,
-                response=None,
-                status="failed",
-                error=str(e),
-            )
-            raise ModelCallError(
-                f"Model call failed (not retried): {e}", cause=e
-            ) from e
-
         except Exception as e:
-            print(f"[DEBUG] actual exception type: {type(e).__module__}.{type(e).__name__}", file=sys.stderr)
-            # Anything unexpected (network issue, etc.) — log and stop.
+            err_msg = str(e).lower()
+            is_rate_limited = (
+                "429" in err_msg
+                or "too_many_requests" in err_msg
+                or "quota exceeded" in err_msg
+                or "resource_exhausted" in err_msg
+                or "rate limit" in err_msg
+            )
+
+            if is_rate_limited and attempt <= max_retries:
+                wait_seconds = 65  # safely past the 60s sliding RPM window
+                print(
+                    f"[model_client] Rate limited (429), pausing for {wait_seconds}s "
+                    f"before retry {attempt}/{max_retries}...",
+                    file=sys.stderr,
+                )
+                time.sleep(wait_seconds)
+                last_error = e
+                continue
+
+            # Non-429 errors (or 429 with no retries left) are unrecoverable.
             last_error = e
             _log_call(
                 prompt=prompt,
@@ -173,7 +108,7 @@ def get_model_response(
                 error=str(e),
             )
             raise ModelCallError(
-                f"Model call failed with an unexpected error: {e}", cause=e
+                f"Model call failed: {e}", cause=e
             ) from e
 
     # Should not normally reach here, but just in case:
@@ -241,12 +176,8 @@ def build_grounded_prompt(
     top_k: int = 3,
     min_score: float = 1.0,
 ) -> str:
-    """
-    Model context construction step (Week 3): retrieves the top-k
-    requirement chunks relevant to `query`, formats them into a cited
-    context block, and inserts that block into the test-proposal
-    prompt alongside module_description.
-    """
+    """Retrieves top-k requirement chunks for `query`, formats them into
+    a cited context block, and inserts it into the test-proposal prompt."""
     retriever = build_rag_pipeline(corpus_dir)
     results = retriever.retrieve(query, top_k=top_k, min_score=min_score)
     requirements_excerpt = retriever.format_context_for_prompt(results)
@@ -269,14 +200,8 @@ def run_evaluation(
     output_path: str,
     delay_between_calls: float = 65.0,
 ) -> list[dict]:
-    """
-    Load a JSON file of evaluation cases, run each one through the
-    model using the given prompt template, and save the results
-    (including the model's actual output) to output_path as JSON.
-
-    Paces requests with `delay_between_calls` to remain comfortably
-    within free-tier RPM limits.
-    """
+    """Runs each evaluation case through the model and saves results to
+    output_path as JSON, paced by delay_between_calls."""
     with open(cases_path, "r", encoding="utf-8") as f:
         cases = json.load(f)
 
@@ -315,7 +240,7 @@ def run_evaluation(
         # Pace requests to respect free-tier RPM ceilings (skip delay after the last case)
         if index < len(cases) - 1:
             time.sleep(delay_between_calls)
-            
+
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
