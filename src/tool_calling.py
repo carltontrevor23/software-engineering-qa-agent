@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import requests
 from typing import Any, Dict, Optional
 from unittest.mock import patch
 
@@ -23,7 +24,8 @@ from subscription_manager import (
 import subscription_manager as sm
 
 SYSTEM_PROMPT = "You are a subscription assistant. Use the available tools to answer."
-manager = SubscriptionManager()
+LEDGER_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "ledgers")
+manager = SubscriptionManager(ledger_dir=LEDGER_DIR)
 
 
 # Tool 1 — read-only, no approval needed.
@@ -35,7 +37,8 @@ def get_user_subscription_status(user_id: str) -> Dict[str, Any]:
         return {"status": "success", "user_id": user_id, **data}
     except UserNotFoundError:
         return {"status": "error", "error": "User not found."}
-
+    except requests.exceptions.RequestException:
+        return {"status": "error", "error": "User lookup service unavailable, try again later."}
 
 # Tool 2 — simulated side effect: upgrades tier, deducts cost.
 @tool
@@ -50,6 +53,10 @@ def upgrade_user_subscription(user_id: str) -> Dict[str, Any]:
         return {"status": "error", "error": "User balance is below the required threshold."}
     except UserNotFoundError:
         return {"status": "error", "error": "User not found."}
+    except requests.exceptions.RequestException:
+        return {"status": "error", "error": "User lookup service unavailable, try again later."}
+    except OSError:
+        return {"status": "error", "error": "Could not write upgrade to ledger, action not completed."}
 
 
 TOOLS = [get_user_subscription_status, upgrade_user_subscription]
@@ -97,7 +104,12 @@ def run(prompt: str) -> str:
     """Sends one prompt through the graph and returns the model's final text answer."""
     result = graph.invoke({"messages": [HumanMessage(content=prompt)]})
     final_replies = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
-    return final_replies[-1].content if final_replies else ""
+    if not final_replies:
+        return ""
+    content = final_replies[-1].content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return content 
 
 
 class _FakeResponse:
@@ -114,7 +126,8 @@ if __name__ == "__main__":
     # here the same way every test in this project mocks it.
     with patch.object(sm, "requests") as mock_requests:
         mock_requests.get.return_value = _FakeResponse(
-            200, {"status": "active", "tier": "STANDARD", "balance": 100.0}
-        )
+    200, {"status": "active", "tier": "STANDARD", "balance": 100.0}
+)
+
         print(run("What's the subscription status of user u123?"))
         print(run("Please upgrade user u123 to premium."))
