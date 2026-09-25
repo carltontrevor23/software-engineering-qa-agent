@@ -26,6 +26,7 @@ Usage (import into other code, e.g. a future tools/agent layer):
 import os
 import sys
 import json
+import time
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ except ImportError:  # pragma: no cover - optional dependency in some envs
 
 from google import genai
 from google.genai import errors as genai_errors
+from rag import build_rag_pipeline
 
 
 # Setup
@@ -78,7 +80,7 @@ class ModelCallError(Exception):
 def get_model_response(
     prompt: str,
     prompt_version: str = "unversioned",
-    max_retries: int = 2,
+    max_retries: int = 3,
 ) -> str:
     """
     Send a prompt to Gemini and return the text response.
@@ -114,7 +116,7 @@ def get_model_response(
 
     last_error: Exception | None = None
 
-    for attempt in range(1, max_retries + 2):  # e.g. max_retries=2 -> 3 attempts
+    for attempt in range(1, max_retries + 2):  # e.g. max_retries=3 -> 4 attempts
         try:
             interaction = client.interactions.create(
                 model=MODEL_NAME,
@@ -130,33 +132,24 @@ def get_model_response(
             )
             return reply_text
 
-        except genai_errors.ClientError as e:
-            # 4xx errors (bad key, model not found, permission denied,
-            # bad request) generally won't fix themselves by retrying.
+        except genai_errors.APIError as e:  # base class — catches ClientError and ServerError both
             last_error = e
-            _log_call(
-                prompt=prompt,
-                prompt_version=prompt_version,
-                response=None,
-                status="failed",
-                error=str(e),
-            )
-            raise ModelCallError(
-                f"Model call failed (client error, not retried): {e}", cause=e
-            ) from e
+            err_msg = str(e).lower()
+            status_code = getattr(e, "code", None)
 
-        except genai_errors.ServerError as e:
-            # 5xx errors / rate limiting are often transient — worth a retry.
-            last_error = e
-            if attempt <= max_retries:
-                wait_seconds = 2 ** attempt  # simple backoff: 2s, 4s, ...
-                print(
-                    f"[model_client] Call failed (attempt {attempt}), "
-                    f"retrying in {wait_seconds}s... ({e})",
-                    file=sys.stderr,
-                )
-                time.sleep(wait_seconds)
-                continue
+            # Handle 429 Too Many Requests (Rate Limits / RPM ceilings)
+            if status_code == 429 or "429" in err_msg or "too_many_requests" in err_msg or "quota exceeded" in err_msg:
+                if attempt <= max_retries:
+                    wait_seconds = 65  # safely past the 60s sliding RPM window
+                    print(
+                        f"[model_client] Rate limited (429), pausing for {wait_seconds}s "
+                        f"before retry {attempt}/{max_retries}...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait_seconds)
+                    continue
+
+            # Non-429 client/server errors are unrecoverable
             _log_call(
                 prompt=prompt,
                 prompt_version=prompt_version,
@@ -165,10 +158,11 @@ def get_model_response(
                 error=str(e),
             )
             raise ModelCallError(
-                f"Model call failed after {attempt} attempts: {e}", cause=e
+                f"Model call failed (not retried): {e}", cause=e
             ) from e
 
         except Exception as e:
+            print(f"[DEBUG] actual exception type: {type(e).__module__}.{type(e).__name__}", file=sys.stderr)
             # Anything unexpected (network issue, etc.) — log and stop.
             last_error = e
             _log_call(
@@ -239,6 +233,30 @@ def build_test_proposal_prompt(
     prompt = prompt.replace("{{requirements_excerpt}}", requirements_excerpt)
     return prompt
 
+def build_grounded_prompt(
+    module_description: str,
+    query: str,
+    template_path: str,
+    corpus_dir: str = str(PROJECT_ROOT / "docs" / "requirements"),
+    top_k: int = 3,
+    min_score: float = 1.0,
+) -> str:
+    """
+    Model context construction step (Week 3): retrieves the top-k
+    requirement chunks relevant to `query`, formats them into a cited
+    context block, and inserts that block into the test-proposal
+    prompt alongside module_description.
+    """
+    retriever = build_rag_pipeline(corpus_dir)
+    results = retriever.retrieve(query, top_k=top_k, min_score=min_score)
+    requirements_excerpt = retriever.format_context_for_prompt(results)
+
+
+    return build_test_proposal_prompt(
+        template_path=template_path,
+        module_description=module_description,
+        requirements_excerpt=requirements_excerpt,
+    )
 
 
 # Batch evaluation runner (runs all 10 cases in one go)
@@ -249,36 +267,22 @@ def run_evaluation(
     template_path: str,
     prompt_version: str,
     output_path: str,
+    delay_between_calls: float = 65.0,
 ) -> list[dict]:
     """
     Load a JSON file of evaluation cases, run each one through the
     model using the given prompt template, and save the results
     (including the model's actual output) to output_path as JSON.
 
-    This is what turns the 10-case evaluation table from a manual,
-    one-call-at-a-time chore into a single command. If one case fails
-    (e.g. a transient API error), the run continues with the rest —
-    the failure is recorded for that case instead of stopping the
-    whole batch.
-
-    Expected format of the cases JSON file: a list of objects like:
-        {
-          "id": 1,
-          "case_type": "Normal / grounded",
-          "module_description": "...",
-          "requirements_excerpt": "...",
-          "expected_behaviour": "..."
-        }
-
-    Returns:
-        The list of result records (also written to output_path).
+    Paces requests with `delay_between_calls` to remain comfortably
+    within free-tier RPM limits.
     """
     with open(cases_path, "r", encoding="utf-8") as f:
         cases = json.load(f)
 
     results = []
 
-    for case in cases:
+    for index, case in enumerate(cases):
         case_id = case.get("id")
         print(f"[model_client] Running case {case_id}...")
 
@@ -308,7 +312,10 @@ def run_evaluation(
             print(f"[model_client] Case {case_id} failed: {e}", file=sys.stderr)
 
         results.append(result)
-
+        # Pace requests to respect free-tier RPM ceilings (skip delay after the last case)
+        if index < len(cases) - 1:
+            time.sleep(delay_between_calls)
+            
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
 
@@ -381,18 +388,12 @@ if __name__ == "__main__":
         with open(source_code_path, "r", encoding="utf-8") as f:
             module_code = f.read()
             example_module = f"Module: src/subscription_manager.py\n\n{module_code}"
-        
 
-        # Load Requirements from disk
-        requirements_path = PROJECT_ROOT / "docs" / "requirements" / "subscription.md"
-        with open(requirements_path, "r", encoding="utf-8") as f:
-            req_content = f.read()
-        example_requirements = f"Source: docs/requirements/subscription.md, Section 2.1\n\n{req_content}"
-
-        full_prompt = build_test_proposal_prompt(
-            template_path=template_path,
+        # 2. Retrieve + format context, then build the prompt (Week 3 RAG)
+        full_prompt = build_grounded_prompt(
             module_description=example_module,
-            requirements_excerpt=example_requirements,
+            query="tier upgrade balance threshold active status",
+            template_path=template_path,
         )
 
         try:
