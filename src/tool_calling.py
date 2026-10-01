@@ -32,6 +32,13 @@ SYSTEM_PROMPT = "You are a subscription assistant. Use the available tools to an
 LEDGER_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "ledgers")
 manager = SubscriptionManager(ledger_dir=LEDGER_DIR)
 
+# Upper bound on assistant -> tool round-trips per run.
+MAX_HOPS = 4
+
+
+class AgentState(MessagesState):
+    hops: int
+
 
 # Tool 1 — read-only, no approval needed.
 @tool
