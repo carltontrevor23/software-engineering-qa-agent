@@ -14,7 +14,7 @@
 | **TF-01** | Missing Parameter | Missing `user_id` on status lookup | `get_user_subscription_status.invoke({})` | Raises LangChain/Pydantic `ValidationError` | **PASS** |
 | **TF-02** | Missing Parameter | Missing `user_id` on upgrade | `upgrade_user_subscription.invoke({})` | Raises LangChain/Pydantic `ValidationError` | **PASS** |
 | **TF-03** | Missing Parameter | Invalid parameter type | `user_id = 12345` (integer instead of string) | Raises `ValidationError` | **PASS** |
-| **TF-04** | Unavailable Service | API Network Timeout | `requests.get` raises `Timeout` | Exception captured / surfaced | **PASS** |
+| **TF-04** | Unavailable Service | API Network Timeout | `requests.get` raises `Timeout` | Tool returns `{"status": "error", "error": "User lookup service unavailable, try again later."}` | **PASS** |
 | **TF-05** | Unavailable Service | API HTTP 500 Server Error | `requests.get` returns HTTP 500 | Tool returns `{"status": "error", "error": "User not found."}` | **PASS** |
 | **TF-06** | Unauthorized / 404 | User lookup on non-existent account | `requests.get` returns HTTP 404 | Tool returns `{"status": "error", "error": "User not found."}` | **PASS** |
 | **TF-07** | Unauthorized / 404 | Upgrade on non-existent account | `requests.get` returns HTTP 404 | Tool returns `{"status": "error", "error": "User not found."}` | **PASS** |
@@ -24,7 +24,8 @@
 
 ---
 
-### 2. Execution Log (Evidence Output)
+### 2. Execution Log: Week 4 run (historical, before tool hardening)
+   Note: TF-04 originally expected the Timeout to propagate. After hardening (Week 4), the tool catches it and returns a structured error, so the test was updated.
 
 ```text
  python -m pytest tests/test_tool_failures.py -v
@@ -53,3 +54,4 @@ tests/test_tool_failures.py::test_unexpected_response_boundary_balance PASSED   
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
 ============================================================== 10 passed, 1 warning in 4.39s ===============================================================
+```
