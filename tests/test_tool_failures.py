@@ -1,8 +1,8 @@
 """
 tests/test_tool_failures.py
 
-Week 4 Failure & Boundary Test Suite:
-Tests missing parameters, unauthorized requests, unavailable services,
+Week 4 Failure, Authorization & Boundary Test Suite:
+Tests missing parameters, unauthorized/unapproved requests, unavailable services,
 and unexpected tool responses against get_user_subscription_status and
 upgrade_user_subscription.
 """
@@ -23,6 +23,21 @@ from src.tool_calling import (
     upgrade_user_subscription,
     _FakeResponse,
 )
+from src.approval import (
+    create_approval_token,
+    _CONSUMED_NONCES,
+    set_approval_hook,
+)
+
+
+@pytest.fixture(autouse=True)
+def reset_test_tokens():
+    """Clear consumed nonces and hooks between tests to prevent side effects."""
+    _CONSUMED_NONCES.clear()
+    set_approval_hook(None)
+    yield
+    _CONSUMED_NONCES.clear()
+    set_approval_hook(None)
 
 
 # =====================================================================
@@ -73,8 +88,32 @@ def test_service_unavailable_500_server_error(mock_get):
 
 
 # =====================================================================
-# 3. Unauthorized Requests & Non-Existent Users
+# 3. Unauthorized Requests & Human Approval Gating
 # =====================================================================
+
+def test_unauthorized_upgrade_missing_token():
+    """
+    Verify high-impact upgrade action without an approval token is blocked
+    and returns an 'approval_required' status payload.
+    """
+    res = upgrade_user_subscription.invoke({"user_id": "u123"})
+    assert res["status"] == "approval_required"
+    assert "Approval token missing" in res["error"]
+
+
+def test_unauthorized_upgrade_tampered_token():
+    """
+    Verify high-impact upgrade action with a tampered or forged token is rejected.
+    """
+    token = create_approval_token("upgrade_user_subscription", {"user_id": "u123"})
+    tampered_token = token[:-4] + "ffff"
+    res = upgrade_user_subscription.invoke({
+        "user_id": "u123",
+        "approval_token": tampered_token,
+    })
+    assert res["status"] == "approval_required"
+    assert "signature is invalid" in res["error"]
+
 
 @patch("requests.get")
 def test_unauthorized_user_lookup_404(mock_get):
@@ -97,7 +136,7 @@ def test_unauthorized_upgrade_404(mock_get, mock_verify):
 
 
 # =====================================================================
-# 4. Unexpected Tool Responses & Business Invariants
+# 4. Unexpected Tool Responses & Business Invariants (With Valid Token)
 # =====================================================================
 
 @patch("src.tool_calling.verify_and_consume_token")

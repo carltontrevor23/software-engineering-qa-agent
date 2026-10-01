@@ -145,8 +145,7 @@ llm_with_tools = llm.bind_tools(TOOLS)
 def assistant(state: AgentState) -> Dict[str, Any]:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
    
-# Retry once if the remote socket closed during human prompt delay
-    max_retries = 3
+    max_retries = 4
     for attempt in range(max_retries):
         try:
             response = llm_with_tools.invoke(messages)
@@ -155,7 +154,10 @@ def assistant(state: AgentState) -> Dict[str, Any]:
             if attempt == max_retries - 1:
                 raise e
             import time
-            time.sleep(1)
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                time.sleep(32)
+            else:
+                time.sleep(2)
 
 # STEP 3 — run the requested tool with Human-in-the-Loop interception.
 
@@ -187,6 +189,13 @@ def execute_tools(state: AgentState) -> Dict[str, Any]:
             ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_call["name"])
         )
     return {"messages": tool_messages, "hops": state.get("hops", 0) + 1}
+
+
+# Stop condition — end the loop once the hop budget is spent.
+def route_after_tools(state: AgentState) -> str:
+    if state.get("hops", 0) >= MAX_HOPS:
+        return END
+    return "assistant"
 
 
 # Stop condition — end the loop once the hop budget is spent.
