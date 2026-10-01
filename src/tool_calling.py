@@ -16,6 +16,7 @@ from langgraph.prebuilt import tools_condition
 
 from model_client import API_KEY, MODEL_NAME
 from subscription_manager import (
+    AlreadyPremiumError,
     InactiveUserError,
     InsufficientFundsError,
     SubscriptionManager,
@@ -28,7 +29,20 @@ from approval import (
     verify_and_consume_token,
 )
 
-SYSTEM_PROMPT = "You are a subscription assistant. Use the available tools to answer."
+SYSTEM_PROMPT = (
+    "You are a subscription assistant. Use the available tools to answer.\n"
+    "Rules for upgrades:\n"
+    "1. Always call get_user_subscription_status for the user first. Never call "
+    "upgrade_user_subscription before you have seen that result.\n"
+    "2. In tool results, 'status' is the tool's own outcome (success/error/"
+    "approval_required); 'account_status' is the user's account state.\n"
+    "3. Only call upgrade_user_subscription if ALL of these hold: account_status "
+    "is 'active', tier is not already 'PREMIUM', and balance is >= $50.00.\n"
+    "4. If any condition fails, do not call upgrade_user_subscription; stop and "
+    "tell the user exactly which condition failed.\n"
+    "5. If a tool returns status 'error' or 'approval_required', stop and report "
+    "it to the user. Do not retry."
+)
 LEDGER_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "ledgers")
 manager = SubscriptionManager(ledger_dir=LEDGER_DIR)
 
@@ -40,13 +54,20 @@ class AgentState(MessagesState):
     hops: int
 
 
+def _account_fields(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Rename the account's 'status' to 'account_status' so it can't clobber the tool's own status."""
+    fields = dict(data)
+    fields["account_status"] = fields.pop("status", None)
+    return fields
+
+
 # Tool 1 — read-only, no approval needed.
 @tool
 def get_user_subscription_status(user_id: str) -> Dict[str, Any]:
     """Look up a user's current subscription tier, status and balance."""
     try:
         data = manager.fetch_user_data(user_id)
-        return {"status": "success", "user_id": user_id, **data}
+        return {"status": "success", "user_id": user_id, **_account_fields(data)}
     except UserNotFoundError:
         return {"status": "error", "error": "User not found."}
     except requests.exceptions.RequestException:
@@ -69,9 +90,11 @@ def upgrade_user_subscription(
     # 2. Perform the upgrade if verification succeeded
     try:
         result = manager.process_upgrade(user_id)
-        return {"status": "success", "user_id": user_id, **result}
+        return {"status": "success", "user_id": user_id, **_account_fields(result)}
     except InactiveUserError:
         return {"status": "error", "error": "User account is not active."}
+    except AlreadyPremiumError:
+        return {"status": "error", "error": "User is already on the PREMIUM tier."}
     except InsufficientFundsError:
         return {"status": "error", "error": "User balance is below the required threshold."}
     except UserNotFoundError:
@@ -130,10 +153,7 @@ def execute_tools(state: AgentState) -> Dict[str, Any]:
         if is_high_impact(tool_name):
             approved, token, message = request_human_approval(tool_name, args)
             if not approved:
-                result = {
-                    "status": "error",
-                    "error": f"Action blocked: {message}",
-                }
+                result = {"status": "approval_required", "error": message}
             else:
                 # Inject the signed, single-use token into the tool execution call
                 args["approval_token"] = token
