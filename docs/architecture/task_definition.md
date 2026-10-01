@@ -1,21 +1,5 @@
 # Week 5 — Task Definition (Activity 1)
 
-## Evidence the approval gap is real, not assumed
-- `src/tool_calling.py`: `upgrade_user_subscription`'s signature only
-  accepts `user_id`. Nothing in `execute_tools()` calls
-  `approval.is_high_impact()`, `request_human_approval()`, or
-  `verify_and_consume_token()` before invoking a tool.
-- `tests/test_tool_failures.py` is a genuinely thorough Week 4 suite,
-  missing parameters, timeouts, 404s, inactive users, insufficient
-  funds, even the exact $49.99 boundary case, but every single call
-  to `upgrade_user_subscription.invoke(...)` in it omits
-  `approval_token`. None of them test approval being required,
-  because the tool does not currently require it.
-- `tests/test_approval.py` exists in the repo but is empty. If the
-  approval gate were wired in, this is where a test asserting "no
-  token means no execution" would live.
-Together these three points confirm the gap independently of any one
-file being possibly stale.
 
 ## Task
 Resolve a user's subscription upgrade request end to end, from a
