@@ -24,6 +24,7 @@ from subscription_manager import (
 )
 import subscription_manager as sm
 from approval import (
+    HIGH_IMPACT_TOOLS,
     is_high_impact,
     request_human_approval,
     verify_and_consume_token,
@@ -48,6 +49,10 @@ manager = SubscriptionManager(ledger_dir=LEDGER_DIR)
 
 # Upper bound on assistant -> tool round-trips per run.
 MAX_HOPS = 4
+# Hard limit: how many tool calls the agent may make in one step.
+MAX_CALLS_PER_STEP = 1
+
+
 
 
 class AgentState(MessagesState):
@@ -111,6 +116,21 @@ def upgrade_user_subscription(
 TOOLS = [get_user_subscription_status, upgrade_user_subscription]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
+AGENT_CONTRACT = {
+    "goal": "Resolve one user's upgrade request: human-approved upgrade or explained refusal.",
+    "approved_tools": sorted(TOOLS_BY_NAME),
+    "high_impact_tools": sorted(HIGH_IMPACT_TOOLS & set(TOOLS_BY_NAME)),
+    "max_hops": MAX_HOPS,
+    "max_calls_per_step": MAX_CALLS_PER_STEP,
+    "stop_conditions": [
+        "success",
+        "precondition_refusal",
+        "human_rejection",
+        "tool_error",
+        "hop_budget_exhausted",
+    ],
+}
+
 # STEP 1 — bind tools to the model.
 llm = ChatGoogleGenerativeAI(
     model=MODEL_NAME, 
@@ -138,35 +158,35 @@ def assistant(state: AgentState) -> Dict[str, Any]:
             time.sleep(1)
 
 # STEP 3 — run the requested tool with Human-in-the-Loop interception.
+
+def _run_one_tool(tool_name: str, args: Dict[str, Any]) -> Any:
+    tool_obj = TOOLS_BY_NAME.get(tool_name)          # allow-list check
+    if tool_obj is None:
+        return {"status": "error", "error": f"Unknown tool '{tool_name}'."}
+
+    if is_high_impact(tool_name):                    # human hand-off
+        approved, token, message = request_human_approval(tool_name, args)
+        if not approved:
+            return {"status": "approval_required", "error": message}
+        args["approval_token"] = token               # signed, single-use
+    return tool_obj.invoke(args)
+
+
 def execute_tools(state: AgentState) -> Dict[str, Any]:
     last_message = state["messages"][-1]
-    tool_call = last_message.tool_calls[0]
-    tool_name = tool_call["name"]
-    call_id = tool_call["id"]
-    args = dict(tool_call.get("args", {}))
-
-    tool_obj = TOOLS_BY_NAME.get(tool_name)
-    if tool_obj is None:
-        result: Any = {"status": "error", "error": f"Unknown tool '{tool_name}'."}
-    else:
-        # Check if the tool modifies state or moves balance
-        if is_high_impact(tool_name):
-            approved, token, message = request_human_approval(tool_name, args)
-            if not approved:
-                result = {"status": "approval_required", "error": message}
-            else:
-                # Inject the signed, single-use token into the tool execution call
-                args["approval_token"] = token
-                result = tool_obj.invoke(args)
+    tool_messages = []
+    for index, tool_call in enumerate(last_message.tool_calls):
+        if index >= MAX_CALLS_PER_STEP:
+            result: Any = {
+                "status": "error",
+                "error": "Only one tool call is allowed per step; this call was skipped.",
+            }
         else:
-            result = tool_obj.invoke(args)
-
-    return {
-        "messages": [
-            ToolMessage(content=str(result), tool_call_id=call_id, name=tool_name)
-        ],
-        "hops": state.get("hops", 0) + 1,
-    }
+            result = _run_one_tool(tool_call["name"], dict(tool_call.get("args", {})))
+        tool_messages.append(
+            ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_call["name"])
+        )
+    return {"messages": tool_messages, "hops": state.get("hops", 0) + 1}
 
 
 # Stop condition — end the loop once the hop budget is spent.

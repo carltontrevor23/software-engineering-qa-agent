@@ -53,12 +53,11 @@ def test_invalid_parameter_type():
 
 @patch("requests.get")
 def test_service_unavailable_timeout(mock_get):
-    """
-    Test handling when external user-lookup API times out.
-    """
-    mock_get.side_effect = requests.exceptions.Timeout("Connection timed out after 5000ms")
-    with pytest.raises(requests.exceptions.Timeout):
-        get_user_subscription_status.invoke({"user_id": "u123"})
+    """External API timeout returns a structured 'unavailable' error, not a crash."""
+    mock_get.side_effect = requests.exceptions.Timeout("Connection timed out after 5000ms.")
+    res = get_user_subscription_status.invoke({"user_id": "u123"})
+    assert res["status"] == "error"
+    assert res["error"] == "User lookup service unavailable, try again later."
 
 
 @patch("requests.get")
