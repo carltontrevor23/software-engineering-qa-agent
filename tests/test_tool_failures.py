@@ -86,10 +86,12 @@ def test_unauthorized_user_lookup_404(mock_get):
     assert res["error"] == "User not found."
 
 
+@patch("src.tool_calling.verify_and_consume_token")
 @patch("requests.get")
-def test_unauthorized_upgrade_404(mock_get):
+def test_unauthorized_upgrade_404(mock_get, mock_verify):
     """Test upgrade attempt on non-existent or unauthorized user."""
     mock_get.return_value = _FakeResponse(404, {"error": "User does not exist"})
+    mock_verify.return_value = (True, "mocked approval")
     res = upgrade_user_subscription.invoke({"user_id": "ghost_user_000"})
     assert res["status"] == "error"
     assert res["error"] == "User not found."
@@ -99,34 +101,40 @@ def test_unauthorized_upgrade_404(mock_get):
 # 4. Unexpected Tool Responses & Business Invariants
 # =====================================================================
 
+@patch("src.tool_calling.verify_and_consume_token")
 @patch("requests.get")
-def test_unexpected_response_inactive_user(mock_get):
+def test_unexpected_response_inactive_user(mock_get, mock_verify):
     """Test that upgrade fails if user account status is not active (e.g. suspended)."""
     mock_get.return_value = _FakeResponse(
         200, {"status": "suspended", "tier": "STANDARD", "balance": 150.0}
     )
+    mock_verify.return_value = (True, "mocked approval")
     res = upgrade_user_subscription.invoke({"user_id": "u_suspended_1"})
     assert res["status"] == "error"
     assert res["error"] == "User account is not active."
 
 
+@patch("src.tool_calling.verify_and_consume_token")
 @patch("requests.get")
-def test_unexpected_response_insufficient_funds(mock_get):
+def test_unexpected_response_insufficient_funds(mock_get, mock_verify):
     """Test that upgrade fails if active user has balance below UPGRADE_COST ($50)."""
     mock_get.return_value = _FakeResponse(
         200, {"status": "active", "tier": "STANDARD", "balance": 25.50}
     )
+    mock_verify.return_value = (True, "mocked approval")
     res = upgrade_user_subscription.invoke({"user_id": "u_poor_2"})
     assert res["status"] == "error"
     assert res["error"] == "User balance is below the required threshold."
 
 
+@patch("src.tool_calling.verify_and_consume_token")
 @patch("requests.get")
-def test_unexpected_response_boundary_balance(mock_get):
+def test_unexpected_response_boundary_balance(mock_get, mock_verify):
     """Test boundary condition: balance at $49.99 (just below $50 threshold)."""
     mock_get.return_value = _FakeResponse(
         200, {"status": "active", "tier": "STANDARD", "balance": 49.99}
     )
+    mock_verify.return_value = (True, "mocked approval")
     res = upgrade_user_subscription.invoke({"user_id": "u_edge_3"})
     assert res["status"] == "error"
     assert res["error"] == "User balance is below the required threshold."
