@@ -1,4 +1,4 @@
-Week 5 execution traces — generated 2026-10-01 17:38:54
+Week 5 execution traces — generated 2026-10-01 18:31:27
 Graph: tool_calling.graph (StateGraph(AgentState), MAX_HOPS = 4)
 Model: scripted FakeLLM | External API: mocked requests.get | Ledgers: temp dir
 
