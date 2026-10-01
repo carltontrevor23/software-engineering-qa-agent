@@ -48,7 +48,7 @@ from rag import build_rag_pipeline
 load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.8-flash")
 
 if not API_KEY:
     raise RuntimeError(
