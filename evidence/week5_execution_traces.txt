@@ -1,0 +1,66 @@
+Week 5 execution traces — generated 2026-10-01 09:39:05
+Graph: tool_calling.graph (StateGraph(AgentState), MAX_HOPS = 4)
+Model: scripted FakeLLM | External API: mocked requests.get | Ledgers: temp dir
+
+========================================================================
+SCENARIO 1: Eligible user — approved and upgraded
+========================================================================
+u123 is active, STANDARD, balance $100.00. The model looks the user
+up first, then calls the upgrade; the human gate approves it.
+
+SENSE     user asks: Please upgrade user u123 to premium.
+  step 1 [assistant    ] PLAN/ACT model calls get_user_subscription_status({'user_id': 'u123'})
+  step 2 [execute_tools] OBSERVE  get_user_subscription_status -> {'status': 'success', 'user_id': 'u123', 'tier': 'STANDARD', 'balance': 100.0, 'account_status': 'active'}
+                         hops = 1/4
+  step 3 [assistant    ] PLAN/ACT model calls upgrade_user_subscription({'user_id': 'u123'})
+                         HUMAN    approval requested for upgrade_user_subscription({'user_id': 'u123'}) -> APPROVED
+  step 4 [execute_tools] OBSERVE  upgrade_user_subscription -> {'status': 'success', 'user_id': 'u123', 'tier': 'PREMIUM', 'balance': 50.0, 'account_status': 'active'}
+                         hops = 2/4
+  step 5 [assistant    ] STOP     model answers: Done: u123 is now on PREMIUM with a $50.00 balance.
+RESULT    run() returned: 'Done: u123 is now on PREMIUM with a $50.00 balance.'
+CHECK     approval requests: 1 (expected 1)
+CHECK     ledger written: True (expected True)
+
+========================================================================
+SCENARIO 2: Ineligible user (balance below $50) — refused, no approval
+========================================================================
+u_poor is active, STANDARD, balance $25.50. After the lookup the model
+sees the balance is below $50 and stops without calling the upgrade,
+so the human is never asked.
+
+SENSE     user asks: Upgrade user u_poor to premium.
+  step 1 [assistant    ] PLAN/ACT model calls get_user_subscription_status({'user_id': 'u_poor'})
+  step 2 [execute_tools] OBSERVE  get_user_subscription_status -> {'status': 'success', 'user_id': 'u_poor', 'tier': 'STANDARD', 'balance': 25.5, 'account_status': 'active'}
+                         hops = 1/4
+  step 3 [assistant    ] STOP     model answers: I can't upgrade u_poor: the balance is $25.50, below the $50.00 upgrade cost. No changes were made.
+RESULT    run() returned: "I can't upgrade u_poor: the balance is $25.50, below the $50.00 upgrade cost. No changes were made."
+CHECK     approval requests: 0 (expected 0)
+CHECK     ledger written: False (expected False)
+
+========================================================================
+SCENARIO 3: Lookup service fails mid-loop — reported, no crash
+========================================================================
+u456 looks eligible on the first lookup. After approval, the upgrade
+re-fetches the user and the service raises ConnectionError. The tool
+turns it into a structured error; the model reports it and stops.
+
+SENSE     user asks: Upgrade user u456 to premium.
+  step 1 [assistant    ] PLAN/ACT model calls get_user_subscription_status({'user_id': 'u456'})
+  step 2 [execute_tools] OBSERVE  get_user_subscription_status -> {'status': 'success', 'user_id': 'u456', 'tier': 'STANDARD', 'balance': 80.0, 'account_status': 'active'}
+                         hops = 1/4
+  step 3 [assistant    ] PLAN/ACT model calls upgrade_user_subscription({'user_id': 'u456'})
+                         HUMAN    approval requested for upgrade_user_subscription({'user_id': 'u456'}) -> APPROVED
+  step 4 [execute_tools] OBSERVE  upgrade_user_subscription -> {'status': 'error', 'error': 'User lookup service unavailable, try again later.'}
+                         hops = 2/4
+  step 5 [assistant    ] STOP     model answers: I couldn't upgrade u456: the user lookup service is unavailable right now, so no changes were made. Please try again later.
+RESULT    run() returned: "I couldn't upgrade u456: the user lookup service is unavailable right now, so no changes were made. Please try again later."
+CHECK     approval requests: 1 (expected 1)
+CHECK     ledger written: False (expected False)
+
+========================================================================
+Done
+========================================================================
+Tool results, approval gating, hop counting and routing above came from the
+real src/tool_calling.py, src/approval.py and src/subscription_manager.py
+running on the real LangGraph graph. Only the model's replies and the
+external user-lookup API were scripted.
