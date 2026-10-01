@@ -13,6 +13,11 @@ class InactiveUserError(Exception):
     pass
 
 
+class AlreadyPremiumError(Exception):
+    """Raised when the user is already on the PREMIUM tier."""
+    pass
+
+
 class UserNotFoundError(Exception):
     """Raised when the user lookup API fails or returns non-200."""
     pass
@@ -37,6 +42,9 @@ class SubscriptionManager:
 
         if user_data.get("status") != "active":
             raise InactiveUserError(f"User {user_id} is not active.")
+
+        if user_data.get("tier") == "PREMIUM":
+            raise AlreadyPremiumError(f"User {user_id} is already PREMIUM.")
 
         balance = float(user_data.get("balance", 0.0))
         if balance < self.UPGRADE_COST:
