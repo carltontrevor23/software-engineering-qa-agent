@@ -99,7 +99,7 @@ llm_with_tools = llm.bind_tools(TOOLS)
 
 
 # STEP 2 — model decides: answer directly, or call a tool?
-def assistant(state: MessagesState) -> Dict[str, Any]:
+def assistant(state: AgentState) -> Dict[str, Any]:
     messages = [SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]
    
 # Retry once if the remote socket closed during human prompt delay
@@ -115,7 +115,7 @@ def assistant(state: MessagesState) -> Dict[str, Any]:
             time.sleep(1)
 
 # STEP 3 — run the requested tool with Human-in-the-Loop interception.
-def execute_tools(state: MessagesState) -> Dict[str, Any]:
+def execute_tools(state: AgentState) -> Dict[str, Any]:
     last_message = state["messages"][-1]
     tool_call = last_message.tool_calls[0]
     tool_name = tool_call["name"]
@@ -144,23 +144,38 @@ def execute_tools(state: MessagesState) -> Dict[str, Any]:
     return {
         "messages": [
             ToolMessage(content=str(result), tool_call_id=call_id, name=tool_name)
-        ]
+        ],
+        "hops": state.get("hops", 0) + 1,
     }
 
 
+# Stop condition — end the loop once the hop budget is spent.
+def route_after_tools(state: AgentState) -> str:
+    if state.get("hops", 0) >= MAX_HOPS:
+        return END
+    return "assistant"
+
+
 # STEP 4 — wire into a graph; tools_condition routes tool calls vs END.
-builder = StateGraph(MessagesState)
+builder = StateGraph(AgentState)
 builder.add_node("assistant", assistant)
 builder.add_node("execute_tools", execute_tools)
 builder.add_edge(START, "assistant")
 builder.add_conditional_edges("assistant", tools_condition, {"tools": "execute_tools", END: END})
-builder.add_edge("execute_tools", "assistant")
+builder.add_conditional_edges(
+    "execute_tools", route_after_tools, {"assistant": "assistant", END: END}
+)
 graph = builder.compile()
+
+STOPPED_MESSAGE = "Stopped: reached the maximum number of tool-call steps"
 
 
 def run(prompt: str) -> str:
     """Sends one prompt through the graph and returns the model's final text answer."""
-    result = graph.invoke({"messages": [HumanMessage(content=prompt)]})
+    result = graph.invoke({"messages": [HumanMessage(content=prompt)], "hops": 0})
+    # Hop limit hit: the loop ended on a tool result instead of an AI reply.
+    if not isinstance(result["messages"][-1], AIMessage):
+        return STOPPED_MESSAGE
     final_replies = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
     if not final_replies:
         return ""
