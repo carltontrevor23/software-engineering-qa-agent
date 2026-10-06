@@ -29,6 +29,7 @@ from approval import (
     request_human_approval,
     verify_and_consume_token,
 )
+from memory import get_case_history, record_case
 
 SYSTEM_PROMPT = (
     "You are a subscription assistant. Use the available tools to answer.\n"
@@ -167,6 +168,15 @@ def _run_one_tool(tool_name: str, args: Dict[str, Any]) -> Any:
         return {"status": "error", "error": f"Unknown tool '{tool_name}'."}
 
     if is_high_impact(tool_name):                    # human hand-off
+        # Case history is printed for the human only; never sent to the LLM or hashed.
+        history = get_case_history(args.get("user_id", "unknown"), limit=3)
+        if history:
+            print(
+                f"[CASE HISTORY] last {len(history)} action(s) for {args.get('user_id')}: "
+                + "; ".join(
+                    f"{h['tool_name']} -> {h['status']} ({h['timestamp']})" for h in history
+                )
+            )
         approved, token, message = request_human_approval(tool_name, args)
         if not approved:
             return {"status": "approval_required", "error": message}
@@ -187,6 +197,12 @@ def execute_tools(state: AgentState) -> Dict[str, Any]:
             result = _run_one_tool(tool_call["name"], dict(tool_call.get("args", {})))
         tool_messages.append(
             ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_call["name"])
+        )
+        record_case(
+            tool_call["args"].get("user_id", "unknown"),
+            tool_call["name"],
+            result.get("status", "unknown") if isinstance(result, dict) else "unknown",
+            state.get("hops", 0),
         )
     return {"messages": tool_messages, "hops": state.get("hops", 0) + 1}
 
