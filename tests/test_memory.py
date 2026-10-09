@@ -94,3 +94,58 @@ def test_case_history_never_reaches_llm_or_token(capsys):
     latest = memory.get_case_history("u1", limit=1)[0]
     assert (latest["tool_name"], latest["status"], latest["hops"]) == (
         "upgrade_user_subscription", "success", 2)
+
+
+def test_delete_user_case_history():
+    memory.record_case("u1", "tool_a", "success", 0)
+    memory.record_case("u2", "tool_b", "success", 0)
+    memory.record_case("u1", "tool_c", "error", 1)
+
+    assert len(memory.get_case_history("u1", limit=5)) == 2
+    assert len(memory.get_case_history("u2", limit=5)) == 1
+
+    deleted = memory.delete_user_case_history("u1")
+    assert deleted == 2
+
+    assert memory.get_case_history("u1") == []
+    assert len(memory.get_case_history("u2")) == 1
+    assert memory.get_case_history("u2")[0]["tool_name"] == "tool_b"
+
+
+def test_purge_expired_records(monkeypatch):
+    import json
+    from datetime import datetime, timezone, timedelta
+
+    old_time = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat()
+    fresh_time = datetime.now(timezone.utc).isoformat()
+
+    old_entry = {
+        "timestamp": old_time,
+        "user_id": "u_old",
+        "tool_name": "tool_old",
+        "status": "success",
+        "hops": 0,
+    }
+    fresh_entry = {
+        "timestamp": fresh_time,
+        "user_id": "u_fresh",
+        "tool_name": "tool_fresh",
+        "status": "success",
+        "hops": 0,
+    }
+
+    import os
+    os.makedirs(memory.MEMORY_DIR, exist_ok=True)
+    with open(memory.MEMORY_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(old_entry) + "\n")
+        f.write(json.dumps(fresh_entry) + "\n")
+
+    purged = memory.purge_expired_records(retention_days=30)
+    assert purged == 1
+
+    remaining_old = memory.get_case_history("u_old")
+    remaining_fresh = memory.get_case_history("u_fresh")
+
+    assert remaining_old == []
+    assert len(remaining_fresh) == 1
+    assert remaining_fresh[0]["user_id"] == "u_fresh"
