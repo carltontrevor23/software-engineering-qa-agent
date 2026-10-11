@@ -1,130 +1,133 @@
-# Week 5: Live Agent Execution Traces Evidence
+# Week 5 (realigned): Bounded QA Agent Execution Traces
 
-**Generated:** 2026-10-01 11:54:55 UTC  
-**Framework:** LangGraph `StateGraph(AgentState)`  
-**Bounds:** `MAX_HOPS = 4`, Single-Use HMAC-SHA256 Human Approval Gate  
+**Generated:** 2026-10-11 05:37:24 UTC  
+**Agent prompt:** `prompts/agent_system_prompt_v2.0.txt`  
+**Limits:** `MAX_HOPS = 7`, `MAX_CALLS_PER_STEP = 1`  
+**Script:** `src/capture_week5_traces.py` (structured records in `evidence/traces/week5_live_traces.jsonl`)
 
----
+Each trace shows, per hop, the graph node, the tool and its arguments, the tool's `status` / `test_outcome`, and the latency since the previous step. `mode` says whether the live Gemini model or the offline scripted LLM produced the decisions.
 
-## Executive Summary
-
-This document presents end-to-end execution traces captured from the live `tool_calling.graph` orchestration loop.
-Unlike mock or unit-test replay scripts, all decisions, tool invocations, and text outputs in these traces were
-autonomously produced by the live `gemini-3.6-flash` model responding to the multi-step control policy.
-
-The traces validate all four required control loop stages and boundary guarantees:
-1. **Sense $\rightarrow$ Context**: Querying read-only state before taking action.
-2. **Plan $\rightarrow$ Decide**: Discerning eligibility from tool payloads prior to requesting high-impact mutation.
-3. **Act $\rightarrow$ Tool**: Intercepting state-changing mutations with human authorization and signed cryptographic tokens.
-4. **Observe $\rightarrow$ Stop/Re-plan**: Resilient error recovery, structured failure handling, and bounded hop termination.
+| Trace | Mode | Tool sequence | Approval | Filed | Stop reason |
+|---|---|---|---|---|---|
+| T1 | `live_gemini` | propose_tests -> run_tests | none | 0 | `all_tests_passed` |
+| T2 | `offline_scripted_llm` | search_requirements -> propose_tests -> run_tests -> draft_issue -> file_issue | APPROVED | 1 | `issue_filed` |
+| T3 | `offline_scripted_llm` | search_requirements -> propose_tests -> run_tests -> draft_issue -> file_issue | REJECTED | 0 | `human_rejection` |
 
 ---
-## TRACE-01: Eligible User — Status Verified, Approved by Human Gate, Upgraded
 
-**Objective:** User u123 is active on STANDARD tier with $100.00 balance. The agent senses status first, evaluates balance >= $50, plans upgrade, requests human approval, and persists new tier.  
-**User Prompt:** `"Please upgrade user u123 to premium."`  
-**Model Used:** `gemini-3.6-flash`  
-**Execution Status:** `COMPLETED` | **Total Hops:** `2/4`  
-**Ledger Written:** `True` | **Human Approvals:** `1`  
+## T1: Correct SUT
 
-### Step-by-Step Control Loop Trace
+**Scenario:** REQ-2.1 against the unmodified SUT. Expected: tests pass and the agent stops without drafting an issue (or reports a test defect if a generated test is wrong).  
+**Mode:** `live_gemini` | **Model:** `gemini-3.8-flash` | **Planted bug:** `False`  
+**Prompt:** "Check REQ-2.1 (Tier Upgrades) against the code."  
+**Hops used:** 2/7 | **Stop reason:** `all_tests_passed`  
 
-| Step | Graph Node | Loop Phase | Action / Observation Summary |
-|---|---|---|---|
-| 0 | `START` | **SENSE** | User asks: "Please upgrade user u123 to premium." |
-| 1 | `assistant` | **PLAN/ACT** | PLAN/ACT: Model calls tool 'get_user_subscription_status' with args {'user_id': 'u123'} |
-| 2 | `execute_tools` | **OBSERVE** | OBSERVE: Tool 'get_user_subscription_status' returned payload: {'status': 'success', 'user_id': 'u123', 'tier': 'STANDARD', 'balance': 100.0, 'account_status': 'active'} |
-| 3 | `assistant` | **PLAN/ACT** | PLAN/ACT: Model calls tool 'upgrade_user_subscription' with args {'user_id': 'u123'} |
-| 4 | `execute_tools` | **OBSERVE** | OBSERVE: Tool 'upgrade_user_subscription' returned payload: {'status': 'success', 'user_id': 'u123', 'tier': 'PREMIUM', 'balance': 50.0, 'account_status': 'active'} |
-| 5 | `assistant` | **STOP** | STOP: Model produces terminal response: "User `u123` has been successfully upgraded to the **PREMIUM** tier.   **Updated Account Details:** - **Tier:** PREMIUM - **Account Status:** Active - **Remaining Balance:** $50.00" |
+| Hop | Node | Step | Tool | Args / result | Status | Test outcome | Latency (s) |
+|---|---|---|---|---|---|---|---|
+| 0 | `assistant` | call_tool | propose_tests | {"requirement_id": "REQ-2.1"} |  |  | 180.33 |
+| 1 | `execute_tools` | tool_result | propose_tests | {"requirement_id": "REQ-2.1", "test_file": "D:\\New folder\\software-engineering-qa-agent\\sandbox\\generated\\test_req_2_1_b2ce4306.py", "test_count": 7} | success |  | 110.99 |
+| 1 | `assistant` | call_tool | run_tests | {"requirement_id": "REQ-2.1", "test_file": "D:\\\\New folder\\\\software-engineering-qa-agent\\\\sandbox\\\\generated\\\\test_req_2_1_b2ce4306.py"} |  |  | 90.74 |
+| 2 | `execute_tools` | tool_result | run_tests | {"passed": 7, "failed": 0, "errors": 0, "failures": [], "requirement_id": "REQ-2.1"} | success | passed | 2.62 |
+| 2 | `assistant` | final_answer |  | **Requirement ID:** REQ-2.1 (Tier Upgrades)   **Tests Run:** 7 sandboxed tests (`test_req_2_1_b2ce4306.py`)   **Outcome:** Passed (7 passed, 0 failed)    All pr... |  |  | 2.48 |
 
-### Human-in-the-Loop Approval Event
+**Human approval events:**
 
-- **Tool Requested:** `upgrade_user_subscription`
-- **Arguments:** `{"user_id": "u123"}`
-- **Operator Gate Decision:** `APPROVED`
+- none (no high-impact tool was requested)
 
-### Final Agent Output
+**Issues filed during this run:** none
 
-> User `u123` has been successfully upgraded to the **PREMIUM** tier. 
+**Final answer:**
+
+> **Requirement ID:** REQ-2.1 (Tier Upgrades)  
+> **Tests Run:** 7 sandboxed tests (`test_req_2_1_b2ce4306.py`)  
+> **Outcome:** Passed (7 passed, 0 failed)  
 > 
-> **Updated Account Details:**
-> - **Tier:** PREMIUM
-> - **Account Status:** Active
-> - **Remaining Balance:** $50.00
-
-### Boundary & Policy Verification
-
-- **Sense Preceded Mutation:** Verified (Tool `get_user_subscription_status` inspected before any mutation).
-- **Human Approval Gate Enforced:** Triggered and approved.
-- **Ledger Mutation Status:** Updated atomically on disk.
+> All proposed tests for REQ-2.1 passed successfully against the system under test. If you would like to save these tests to the test suite using `save_test_to_suite`, please let me know.
 
 ---
 
-## TRACE-02: Ineligible User (Insufficient Funds) — Refused Early Without Approval
+## T2: Planted defect, human approves
 
-**Objective:** User u_poor is active on STANDARD tier with only $25.50 balance. The agent senses status, observes balance < $50.00, refuses immediately with explanation, and NEVER calls high-impact upgrade tool.  
-**User Prompt:** `"Please upgrade user u_poor to premium."`  
-**Model Used:** `gemini-3.6-flash`  
-**Execution Status:** `COMPLETED` | **Total Hops:** `1/4`  
-**Ledger Written:** `False` | **Human Approvals:** `0`  
+**Scenario:** REQ-2.1 with 'balance <' changed to 'balance <=' in a temporary SUT copy. Expected: boundary test fails -> draft_issue -> human approves -> file_issue succeeds.  
+**Mode:** `offline_scripted_llm` | **Model:** `ScriptedLLM + demo/fixtures/req_2_1_tests.py` | **Planted bug:** `True`  
+**Prompt:** "Check REQ-2.1 (Tier Upgrades) against the code."  
+**Hops used:** 5/7 | **Stop reason:** `issue_filed`  
+**Live run failed, fell back to offline:** `GoogleRateLimitError: Error calling model 'gemini-3.8-flash' (RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your...`  
 
-### Step-by-Step Control Loop Trace
+| Hop | Node | Step | Tool | Args / result | Status | Test outcome | Latency (s) |
+|---|---|---|---|---|---|---|---|
+| 0 | `assistant` | call_tool | search_requirements | {"query": "Check REQ-2.1 (Tier Upgrades) against the code."} |  |  | 0.0 |
+| 1 | `execute_tools` | tool_result | search_requirements | {"results": [{"requirement_id": "REQ-2.1", "source_file": "docs/requirements/subscription.md", "score": 6.405, "text": "[Feature: User Subscription Tier Upgrade... | success |  | 0.01 |
+| 1 | `assistant` | call_tool | propose_tests | {"requirement_id": "REQ-2.1"} |  |  | 0.0 |
+| 2 | `execute_tools` | tool_result | propose_tests | {"requirement_id": "REQ-2.1", "test_file": "D:\\New folder\\software-engineering-qa-agent\\sandbox\\generated\\test_req_2_1_01990121.py", "test_count": 3} | success |  | 0.01 |
+| 2 | `assistant` | call_tool | run_tests | {"requirement_id": "REQ-2.1", "test_file": "D:\\New folder\\software-engineering-qa-agent\\sandbox\\generated\\test_req_2_1_01990121.py"} |  |  | 0.0 |
+| 3 | `execute_tools` | tool_result | run_tests | {"passed": 2, "failed": 1, "errors": 0, "failures": [{"test_name": "sandbox.generated.test_req_2_1_01990121::test_upgrade_at_exactly_50_00", "message": "subscri... | success | failed | 4.93 |
+| 3 | `assistant` | call_tool | draft_issue | {"requirement_id": "REQ-2.1", "title": "REQ-2.1: implementation contradicts the requirement", "summary": "CODE defect: the failing tests check behaviour the req... |  |  | 0.0 |
+| 4 | `execute_tools` | tool_result | draft_issue | {"draft_path": "D:\\New folder\\software-engineering-qa-agent\\evidence\\issues\\drafts\\ISSUE-REQ-2.1-20261011T053247Z.md"} | success |  | 0.01 |
+| 4 | `assistant` | call_tool | file_issue | {"draft_path": "D:\\New folder\\software-engineering-qa-agent\\evidence\\issues\\drafts\\ISSUE-REQ-2.1-20261011T053247Z.md"} |  |  | 0.0 |
+| 5 | `execute_tools` | tool_result | file_issue | {"filed_path": "D:\\New folder\\software-engineering-qa-agent\\evidence\\issues\\filed\\ISSUE-REQ-2.1-20261011T053247Z.md", "channel": "local"} | success |  | 0.03 |
+| 5 | `assistant` | final_answer |  | [SCRIPTED LLM] CODE defect found. Issue filed at D:\New folder\software-engineering-qa-agent\evidence\issues\filed\ISSUE-REQ-2.1-20261011T053247Z.md. |  |  | 0.0 |
 
-| Step | Graph Node | Loop Phase | Action / Observation Summary |
-|---|---|---|---|
-| 0 | `START` | **SENSE** | User asks: "Please upgrade user u_poor to premium." |
-| 1 | `assistant` | **PLAN/ACT** | PLAN/ACT: Model calls tool 'get_user_subscription_status' with args {'user_id': 'u_poor'} |
-| 2 | `execute_tools` | **OBSERVE** | OBSERVE: Tool 'get_user_subscription_status' returned payload: {'status': 'success', 'user_id': 'u_poor', 'tier': 'STANDARD', 'balance': 25.5, 'account_status': 'active'} |
-| 3 | `assistant` | **STOP** | STOP: Model produces terminal response: "The upgrade cannot be completed. User `u_poor` has an account balance of $25.50, which does not meet the requirement of having a balance of at least $50.00." |
+**Human approval events:**
 
-### Final Agent Output
+- `file_issue` on `ISSUE-REQ-2.1-20261011T053247Z.md` -> **APPROVED**
 
-> The upgrade cannot be completed. User `u_poor` has an account balance of $25.50, which does not meet the requirement of having a balance of at least $50.00.
+**Issues filed during this run:** ISSUE-REQ-2.1-20261011T053247Z.md
 
-### Boundary & Policy Verification
+**Final answer:**
 
-- **Sense Preceded Mutation:** Verified (Tool `get_user_subscription_status` inspected before any mutation).
-- **Human Approval Gate Enforced:** Bypassed appropriately (no high-impact tool called).
-- **Ledger Mutation Status:** Unmodified (no unauthorized side effect).
+> [SCRIPTED LLM] CODE defect found. Issue filed at D:\New folder\software-engineering-qa-agent\evidence\issues\filed\ISSUE-REQ-2.1-20261011T053247Z.md.
+
+---
+
+## T3: Planted defect, human rejects (failure/recovery)
+
+**Scenario:** Same as T2, but the human rejects file_issue. Expected: the agent stops with human_rejection and nothing is filed.  
+**Mode:** `offline_scripted_llm` | **Model:** `ScriptedLLM + demo/fixtures/req_2_1_tests.py` | **Planted bug:** `True`  
+**Prompt:** "Check REQ-2.1 (Tier Upgrades) against the code."  
+**Hops used:** 5/7 | **Stop reason:** `human_rejection`  
+**Live run failed, fell back to offline:** `GoogleRateLimitError: Error calling model 'gemini-3.8-flash' (RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your...`  
+
+| Hop | Node | Step | Tool | Args / result | Status | Test outcome | Latency (s) |
+|---|---|---|---|---|---|---|---|
+| 0 | `assistant` | call_tool | search_requirements | {"query": "Check REQ-2.1 (Tier Upgrades) against the code."} |  |  | 0.0 |
+| 1 | `execute_tools` | tool_result | search_requirements | {"results": [{"requirement_id": "REQ-2.1", "source_file": "docs/requirements/subscription.md", "score": 6.405, "text": "[Feature: User Subscription Tier Upgrade... | success |  | 0.01 |
+| 1 | `assistant` | call_tool | propose_tests | {"requirement_id": "REQ-2.1"} |  |  | 0.0 |
+| 2 | `execute_tools` | tool_result | propose_tests | {"requirement_id": "REQ-2.1", "test_file": "D:\\New folder\\software-engineering-qa-agent\\sandbox\\generated\\test_req_2_1_81d83950.py", "test_count": 3} | success |  | 0.01 |
+| 2 | `assistant` | call_tool | run_tests | {"requirement_id": "REQ-2.1", "test_file": "D:\\New folder\\software-engineering-qa-agent\\sandbox\\generated\\test_req_2_1_81d83950.py"} |  |  | 0.0 |
+| 3 | `execute_tools` | tool_result | run_tests | {"passed": 2, "failed": 1, "errors": 0, "failures": [{"test_name": "sandbox.generated.test_req_2_1_81d83950::test_upgrade_at_exactly_50_00", "message": "subscri... | success | failed | 19.1 |
+| 3 | `assistant` | call_tool | draft_issue | {"requirement_id": "REQ-2.1", "title": "REQ-2.1: implementation contradicts the requirement", "summary": "CODE defect: the failing tests check behaviour the req... |  |  | 0.0 |
+| 4 | `execute_tools` | tool_result | draft_issue | {"draft_path": "D:\\New folder\\software-engineering-qa-agent\\evidence\\issues\\drafts\\ISSUE-REQ-2.1-20261011T053724Z.md"} | success |  | 0.14 |
+| 4 | `assistant` | call_tool | file_issue | {"draft_path": "D:\\New folder\\software-engineering-qa-agent\\evidence\\issues\\drafts\\ISSUE-REQ-2.1-20261011T053724Z.md"} |  |  | 0.0 |
+| 5 | `execute_tools` | tool_result | file_issue | {"error": "Action rejected by human operator."} | approval_required |  | 0.14 |
+| 5 | `assistant` | final_answer |  | [SCRIPTED LLM] The human rejected filing the issue, so nothing was filed. The draft stays in evidence/issues/drafts for review. |  |  | 0.0 |
+
+**Human approval events:**
+
+- `file_issue` on `ISSUE-REQ-2.1-20261011T053724Z.md` -> **REJECTED**
+
+**Issues filed during this run:** none
+
+**Final answer:**
+
+> [SCRIPTED LLM] The human rejected filing the issue, so nothing was filed. The draft stays in evidence/issues/drafts for review.
 
 ---
 
-## TRACE-03: Mid-Loop Service Outage — Structured Error Catch and Graceful Recovery
+## Note on live-model availability (2026-10-11)
 
-**Objective:** User u456 passes initial lookup with $80.00 balance. During upgrade execution, external API raises ConnectionError. Tool returns structured error; agent observes error, avoids retry loops, reports outage to user, and stops safely.  
-**User Prompt:** `"Please upgrade user u456 to premium."`  
-**Model Used:** `gemini-3.6-flash`  
-**Execution Status:** `COMPLETED` | **Total Hops:** `2/4`  
-**Ledger Written:** `False` | **Human Approvals:** `1`  
+- **T1** ran fully on the live model (`gemini-3.8-flash`). Given an explicit `REQ-2.1`, the model
+  skipped `search_requirements` (rule 1) and went straight to `propose_tests`.
+- **T2 first ran live, and that live run completed its work.** The model proposed tests, the
+  exact-$50.00 test failed under the planted defect, and the model re-planned with two
+  `search_requirements` calls (6 tool steps, within `MAX_HOPS = 7`). It then drafted the issue, the
+  human approved, and `file_issue` filed `ISSUE-REQ-2.1-20261011T052525Z.md`. The model's final
+  answer call then failed with `429 RESOURCE_EXHAUSTED`: the free tier allows 20 requests per day
+  for this model. The script therefore re-ran T2 with the scripted LLM; that is the structured
+  record above. The live steps are kept in the console log
+  `evidence/traces/week5_capture_console_2026-10-11.log`.
+- **T3** fell back to the scripted LLM straight away for the same quota reason.
 
-### Step-by-Step Control Loop Trace
-
-| Step | Graph Node | Loop Phase | Action / Observation Summary |
-|---|---|---|---|
-| 0 | `START` | **SENSE** | User asks: "Please upgrade user u456 to premium." |
-| 1 | `assistant` | **PLAN/ACT** | PLAN/ACT: Model calls tool 'get_user_subscription_status' with args {'user_id': 'u456'} |
-| 2 | `execute_tools` | **OBSERVE** | OBSERVE: Tool 'get_user_subscription_status' returned payload: {'status': 'success', 'user_id': 'u456', 'tier': 'STANDARD', 'balance': 80.0, 'account_status': 'active'} |
-| 3 | `assistant` | **PLAN/ACT** | PLAN/ACT: Model calls tool 'upgrade_user_subscription' with args {'user_id': 'u456'} |
-| 4 | `execute_tools` | **OBSERVE** | OBSERVE: Tool 'upgrade_user_subscription' returned payload: {'status': 'error', 'error': 'User lookup service unavailable, try again later.'} |
-| 5 | `assistant` | **STOP** | STOP: Model produces terminal response: "The upgrade request for user **u456** could not be completed because an error occurred:  **Error:** User lookup service unavailable, try again later." |
-
-### Human-in-the-Loop Approval Event
-
-- **Tool Requested:** `upgrade_user_subscription`
-- **Arguments:** `{"user_id": "u456"}`
-- **Operator Gate Decision:** `APPROVED`
-
-### Final Agent Output
-
-> The upgrade request for user **u456** could not be completed because an error occurred:
-> 
-> **Error:** User lookup service unavailable, try again later.
-
-### Boundary & Policy Verification
-
-- **Sense Preceded Mutation:** Verified (Tool `get_user_subscription_status` inspected before any mutation).
-- **Human Approval Gate Enforced:** Triggered and approved.
-- **Ledger Mutation Status:** Unmodified (no unauthorized side effect).
-
----
+Free-tier limit to plan for: one live end-to-end run uses about 5 to 8 model requests. Gemini also
+returned `503 high demand` several times; the retries in `assistant()` absorbed those but added
+minutes of latency (see the `latency_s` column).

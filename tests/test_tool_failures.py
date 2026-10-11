@@ -335,3 +335,101 @@ def test_case_history_key_comes_from_requirement_or_file_name():
     assert qa_tools.requirement_id_from_args(
         {"test_file": "sandbox/generated/test_req_2_1_abcdef12.py"}) == "REQ-2.1"
     assert qa_tools.requirement_id_from_args({"query": "refunds"}) == "unknown"
+
+
+# =====================================================================
+# 6. GitHub Issues integration (file_issue, Week 6 realignment)
+# =====================================================================
+
+import requests
+from unittest.mock import MagicMock
+
+FAKE_TOKEN = "ghp_FAKE_TOKEN_must_never_leak_0123456789"
+
+
+@pytest.fixture
+def github_env(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", FAKE_TOKEN)
+    monkeypatch.setenv("GITHUB_REPO", "demo-owner/inspectra-demo")
+
+
+def _approved_file(draft):
+    token = approval.create_approval_token("file_issue", {"draft_path": draft})
+    return file_issue.invoke({"draft_path": draft, "approval_token": token})
+
+
+def _response(status_code, payload=None):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.json.return_value = payload or {}
+    return resp
+
+
+def test_file_issue_posts_to_github(github_env):
+    draft = _make_draft()
+    with patch.object(qa_tools.requests, "post", return_value=_response(
+            201, {"html_url": "https://github.com/demo-owner/inspectra-demo/issues/7"})) as post:
+        res = _approved_file(draft)
+    assert res == {"status": "success", "channel": "github",
+                   "issue_url": "https://github.com/demo-owner/inspectra-demo/issues/7"}
+    url = post.call_args.args[0]
+    kwargs = post.call_args.kwargs
+    assert url == "https://api.github.com/repos/demo-owner/inspectra-demo/issues"
+    assert kwargs["headers"]["Authorization"] == f"Bearer {FAKE_TOKEN}"
+    assert kwargs["timeout"] == 15
+    assert kwargs["json"]["title"] == "Upgrade rejected at exactly $50.00"
+    assert kwargs["json"]["labels"] == ["inspectra-qa"]
+    assert kwargs["json"]["body"] == Path(draft).read_text(encoding="utf-8")
+    assert FAKE_TOKEN not in str(res)
+    # GitHub is the filing channel: no local copy is made.
+    assert not (qa_tools.ISSUES_DIR / "filed").exists()
+
+
+def test_file_issue_github_401_keeps_draft(github_env):
+    draft = _make_draft()
+    with patch.object(qa_tools.requests, "post", return_value=_response(401, {"message": "Bad credentials"})):
+        res = _approved_file(draft)
+    assert res["status"] == "error"
+    assert "HTTP 401" in res["error"]
+    assert FAKE_TOKEN not in str(res)
+    assert Path(draft).exists()
+    assert not (qa_tools.ISSUES_DIR / "filed").exists()
+
+
+def test_file_issue_github_timeout_keeps_draft(github_env):
+    draft = _make_draft()
+    with patch.object(qa_tools.requests, "post", side_effect=requests.exceptions.Timeout("read timed out")):
+        res = _approved_file(draft)
+    assert res["status"] == "error"
+    assert "Timeout" in res["error"]
+    assert Path(draft).exists()
+    assert not (qa_tools.ISSUES_DIR / "filed").exists()
+
+
+def test_file_issue_without_github_env_files_locally(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPO", raising=False)
+    draft = _make_draft()
+    with patch.object(qa_tools.requests, "post") as post:
+        res = _approved_file(draft)
+    post.assert_not_called()
+    assert res["status"] == "success" and res["channel"] == "local"
+
+
+def test_github_token_never_in_tool_message_or_memory(github_env):
+    import memory
+    import workflow
+    from langchain_core.messages import AIMessage
+    from src.tool_calling import execute_tools
+
+    draft = _make_draft()
+    approval.set_approval_hook(lambda tool_name, args: True)
+    msg = AIMessage(content="", tool_calls=[
+        {"name": "file_issue", "args": {"draft_path": draft}, "id": "c1", "type": "tool_call"}])
+    state = {"messages": [msg], "hops": 0, **workflow.new_workflow(),
+             "phase": "ISSUE_DRAFTED", "requirement_id": "REQ-2.1", "draft_path": draft}
+    for code in (201, 401):
+        with patch.object(qa_tools.requests, "post", return_value=_response(code, {"html_url": "https://x/1"})):
+            out = execute_tools(state)
+        assert FAKE_TOKEN not in out["messages"][0].content
+    assert FAKE_TOKEN not in Path(memory.MEMORY_FILE).read_text(encoding="utf-8")

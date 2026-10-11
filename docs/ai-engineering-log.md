@@ -32,3 +32,65 @@ and what a team member must review before the change is accepted.
     (`ISSUE-REQ-2.1-...`) or generated test name (`test_req_2_1_...`).
   - That the baseline SUT tests in `sut/tests/` match the requirements in
     `docs/requirements/subscription.md`.
+
+---
+
+## 2026-10-11 — Week 5 realignment: bounded QA agent loop, demo runner, traces
+
+- **Tool / model:** Claude Code (Claude Opus 5.5) as coding agent; Gemini `gemini-3.8-flash` as the
+  live agent model during trace capture.
+- **Prompt given:** the team's "Prompt 2: Week 5 realignment".
+- **Generated:**
+  - `prompts/agent_system_prompt_v2.0.txt`, loaded from file by `src/tool_calling.py`
+    (`MAX_HOPS = 7`, new goal and stop conditions, duplicate `route_after_tools` removed, CLI)
+  - `src/demo_support.py` (scripted LLM, planted-bug SUT copy, step tracer, stop-reason helper)
+  - `demo/run_demo.py`, `demo/fixtures/req_2_1_tests.py`
+  - rewritten `src/capture_week5_traces.py`, and new traces in `evidence/traces/week5_live_traces.jsonl`
+    and `evidence/week5_live_execution_traces.md`
+  - old subscription traces moved to `evidence/legacy/` with `git mv` (see its README)
+  - `docs/architecture/task_definition.md`, `agent_control_loop_spec.md`, `agent_task_contract.md`
+  - new tests in `tests/test_agent_contract.py`
+- **Verified by the agent:** 75 tests pass; offline demo approve and reject paths run end to end.
+  T1 was captured live. T2 and T3 fell back to the scripted LLM after the free-tier daily quota
+  (20 requests) ran out. The live T2 run's steps are in
+  `evidence/traces/week5_capture_console_2026-10-11.log`.
+- **Deviation:** a seventh stop condition, `test_defect_reported`, because rule 5 lets the agent stop
+  without filing when the generated test is wrong.
+- **A human must review:**
+  - the agent rules in the v2.0 prompt;
+  - that the scripted LLM is clearly labelled and only used offline;
+  - whether T2/T3 should be re-captured live once quota allows.
+
+---
+
+## 2026-10-11 — Week 6 realignment: workflow state, test-run memory, GitHub and MCP
+
+- **Tool / model:** Claude Code (Claude Opus 5.5) as coding agent. No live Gemini calls (daily
+  free-tier quota exhausted); all verification used the offline scripted LLM and mocks.
+- **Prompt given:** the team's "Prompt 3: Week 6 realignment".
+- **Generated:**
+  - `src/workflow.py` (phases, `ALLOWED_TOOLS_BY_PHASE`, file pinning, stop reasons);
+    `AgentState` fields and `initial_state()` in `src/tool_calling.py`
+  - `src/memory.py` keyed by `requirement_id`, with `test_outcome` / `failed_count`, the
+    `format_history` / `advisory` helpers and `delete_requirement_history`
+  - GitHub Issues filing in `qa_tools.file_issue`; `.env.example` GitHub settings
+  - `src/mcp_server.py` (session phase guard, `start_check`) and `src/mcp_demo_client.py`
+  - tests: `tests/test_memory.py`, `tests/test_memory_behavior.py`, `tests/test_mcp_server.py`,
+    and new workflow tests in `tests/test_agent_contract.py` and `tests/test_tool_failures.py`
+  - docs: `state_model.md`, `memory_design_and_data_handling_note.md`, `mcp_interface_spec.md`,
+    `week-6-report.md`, `README.md`; regenerated `evidence/memory_evaluation_evidence.md` and
+    `evidence/agent contract test evidence.md`
+- **Verified by the agent:**
+  - full suite passes;
+  - `demo/run_demo.py --offline` (pass), then `--planted-bug --offline` approved (advisory
+    `FIRST FAILURE`), then rejected (advisory `RECURRING`);
+  - a real HTTP round trip between `mcp_server.py` and `mcp_demo_client.py` (offline model).
+- **Deviations:**
+  - an extra state field, `proposals_made`, to enforce "one regenerate";
+  - an extra MCP capability, `start_check`, to reset the server session;
+  - `test_defect_reported` (from Week 5) is set when the model stops in `TESTS_RUN_FAILED`.
+- **A human must review:**
+  - the advisory wording and thresholds in `memory.advisory()`;
+  - the phase table in `workflow.py`;
+  - the GitHub path against a real demo repository (it is only tested with mocked HTTP);
+  - the realignment owner entry in `week-6-report.md`, which the team must fill in.

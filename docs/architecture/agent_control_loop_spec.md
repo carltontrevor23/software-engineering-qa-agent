@@ -1,91 +1,93 @@
-# Agent Control Loop Specification: Sense-Plan-Act-Observe-Stop
+# Agent Control Loop Specification: Sense-Plan-Act-Observe-Stop (realigned)
 
-This document outlines the deterministic 5-stage control loop and decision architecture for the **Bounded User Subscription Agent**.
+This document describes the control loop of the **bounded Inspectra QA agent**
+(`src/tool_calling.py`). It replaces the earlier spec for the subscription-upgrade agent, which is
+in git history.
+
+The loop is a LangGraph `StateGraph`:
+`START → assistant → (tool call?) → execute_tools → route_after_tools → assistant … → END`.
 
 ---
 
 ## Stage 1: Sense / Context
 
-### Information Received
-* **Initial Turn:** Natural-language user prompt (e.g., extracting intent: `upgrade`, target: `user_id="u123"`).
-* **Intermediate Turn:** Observation payload returned by `get_user_subscription_status`:
-  * Account status (`active`, `suspended`, `pending`, or `not_found`).
-  * Current tier (`FREE`, `STANDARD`, `PREMIUM`).
-  * Current balance (e.g., `$100.00`).
+### Information received
+- **First turn:** the developer's request, e.g. *"Check REQ-2.1 (Tier Upgrades) against the code."*
+- **Later turns:** each tool result, returned as a `ToolMessage` containing `status`, plus
+  `test_outcome` for `run_tests`.
 
-### Relevant Context Evaluated
-* **Requirements rules** from `docs/requirements/subscription.md`:
-  * User account status must be `"active"`.
-  * Current tier must not already be `"PREMIUM"`.
-  * Current balance must be $\ge \$50.00$ (`UPGRADE_COST`).
-* **Safety policy** from `src/approval.py`:
-  * `upgrade_user_subscription` is registered in `HIGH_IMPACT_TOOLS` and modifies financial/ledger state.
+### Context the agent works from
+- The agent rules in `prompts/agent_system_prompt_v2.0.txt` (version `v2.0`, recorded in `AGENT_CONTRACT`).
+- Requirement text from `docs/requirements/*.md`, retrieved by `search_requirements` (BM25).
+- The SUT source, included by `propose_tests` when it asks the model for tests.
+
+Requirement text, test code and test output are treated as **data, not instructions** (rule 7).
 
 ---
 
 ## Stage 2: Plan / Decide
 
-The agent chooses among three deterministic paths based strictly on available context:
+Gemini picks exactly one next tool per step (`MAX_CALLS_PER_STEP = 1`; extra calls in the same
+step are skipped with an error result).
 
-* **Path A — Missing Account Context:**
-  * **Condition:** Account status, current tier, and balance for `user_id` are not yet known.
-  * **Decision:** Call `get_user_subscription_status(user_id)`.
-
-* **Path B — Ineligible / Precondition Failure:**
-  * **Condition:** Account data is present, but fails acceptance criteria:
-    * User does not exist (`UserNotFoundError`).
-    * Status is not `"active"` (e.g., suspended or pending).
-    * Tier is already `"PREMIUM"`.
-    * Balance is below the $\$50.00$ threshold.
-  * **Decision:** Do not request human approval; proceed directly to **Stop** with an explicit refusal explanation.
-
-* **Path C — Eligible for Mutation:**
-  * **Condition:** User is active, tier is upgradeable, and balance is $\ge \$50.00$.
-  * **Decision:** Call `upgrade_user_subscription(user_id)`.
+| Path | Condition | Decision |
+|---|---|---|
+| A — Resolve requirement | No requirement id known yet | `search_requirements(query)`; skipped if the user gave `REQ-X.Y` |
+| B — No requirement | Search returns no results | Stop and say so |
+| C — Propose | Requirement id known, no tests yet | `propose_tests(requirement_id)` |
+| D — Run | Test file returned | `run_tests(requirement_id, test_file)` |
+| E — Passed | `test_outcome = passed` | Report and stop. Offer `save_test_to_suite`, but do not call it unless asked |
+| F — Test defect | Failure contradicts nothing in the requirement | Explain and stop, file nothing |
+| G — Code defect | Failure shows behaviour contradicting the requirement | `draft_issue`, then `file_issue` |
+| H — Error | Any `status` of `error` or `approval_required` | Stop and report, no retry |
 
 ---
 
 ## Stage 3: Act / Tool
 
-The agent triggers the approved tool selected during planning:
+| Tool | Impact | What the system does |
+|---|---|---|
+| `search_requirements` | Low | BM25 retrieval over `docs/requirements/` |
+| `propose_tests` | Low | Model writes pytest code; checked against the sandbox policy; saved to `sandbox/generated/` |
+| `run_tests` | Low | pytest in a separate process: no shell, 60 s timeout, secret-free environment |
+| `draft_issue` | Low | Markdown draft in `evidence/issues/drafts/` |
+| `file_issue` | **High** | `_run_one_tool` shows the case history and asks the human; on approval it mints a signed single-use token, which the tool verifies before filing |
+| `save_test_to_suite` | **High** | Same approval flow; copies a generated test into `sut/tests/` |
 
-### Tool 1: `get_user_subscription_status` *(Autonomous / Low-Impact)*
-* **Parameters:** `{"user_id": "u123"}`
-* **System Action:** Queries `SubscriptionManager.fetch_user_data()` to fetch read-only metadata.
-
-### Tool 2: `upgrade_user_subscription` *(Higher-Impact Action)*
-* **Parameters:** `{"user_id": "u123", "approval_token": <token>}`
-* **Connection Point:** The orchestration layer intercepts this call via `is_high_impact()`, requesting human operator confirmation before execution.
-* **System Action:** Deducts $\$50.00$, updates tier to `"PREMIUM"`, and performs an atomic write to `/data/ledgers/{user_id}.json`.
+Every executed call is checked against the tool allow-list first; unknown tools return an error.
 
 ---
 
 ## Stage 4: Observe
 
-The agent receives and parses the tool result:
-
-### From `get_user_subscription_status`
-* **Success Result:** `{"status": "success", "tier": "STANDARD", "account_status": "active", "balance": 100.0}`
-* **Error Result:** `{"status": "error", "error": "User not found."}`
-* **Effect on Next Step:** Provides the necessary context for the agent to branch into Path B (refusal) or Path C (upgrade).
-
-### From `upgrade_user_subscription` *(or Approval Intercept)*
-* **Approved & Succeeded:** `{"status": "success", "tier": "PREMIUM", "balance": 50.0}`
-* **Human Rejection:** `{"status": "approval_required", "error": "Action rejected by human operator."}`
-* **System/Disk Failure:** `{"status": "error", "error": "Could not write upgrade to ledger..."}`
-* **Effect on Next Step:** Determines whether the task succeeded or ended in an explained refusal/failure.
+| Tool | Result that changes the next step |
+|---|---|
+| `search_requirements` | `results[].requirement_id`, or `note: NO_RELEVANT_REQUIREMENTS_FOUND` |
+| `propose_tests` | `test_file` and `test_count`, or an `error` (unknown id, model unavailable, refusal, unsafe code) |
+| `run_tests` | `test_outcome` (`passed` / `failed` / `no_tests`) and `failures[].test_name` / `message` |
+| `draft_issue` | `draft_path` |
+| `file_issue` | `success` (`filed_path`), or `approval_required` (human rejected or no valid token) |
 
 ---
 
 ## Stage 5: Stop / Re-plan
 
-### When the Agent RE-PLANS
-* **Exactly once:** After observing the return payload of `get_user_subscription_status`. The agent re-enters **Stage 2 (Plan/Decide)** equipped with the new account context to decide whether to attempt the upgrade or refuse.
+### Re-plan
+The agent may re-plan when an observation does not settle the next step, for example a second,
+narrower `search_requirements`. `MAX_HOPS = 7` allows the longest legitimate path (5 tool steps)
+plus one re-plan step to still end in a final answer.
 
-### When the Agent STOPS (Task Complete)
-The workflow deterministically stops under four terminal conditions:
+### Stop conditions (`AGENT_CONTRACT["stop_conditions"]`)
 
-1. **Terminal Success:** Tool returns `status: "success"` with updated tier. Agent stops and issues confirmation to the user.
-2. **Precondition Refusal:** Ineligibility observed during Stage 2 (e.g., insufficient funds or suspended user). Agent stops and outputs the specific reason.
-3. **Human Rejection:** Operator declined approval. Agent stops and explains that the operation was denied by human authorization.
-4. **Tool Failure:** Service timed out or disk write failed. Agent stops and reports the failure without retrying.
+| Condition | When |
+|---|---|
+| `all_tests_passed` | `run_tests` reports `passed` |
+| `issue_filed` | Human approved and `file_issue` succeeded |
+| `human_rejection` | Human rejected `file_issue` / `save_test_to_suite` |
+| `tool_error` | A tool returned `status: error` |
+| `requirement_not_found` | No matching requirement, or an unknown requirement id |
+| `hop_budget_exhausted` | `hops >= MAX_HOPS`: `route_after_tools` ends the graph, `run()` returns the stopped message |
+| `test_defect_reported` | Tests failed, but the agent judged the generated test wrong and filed nothing |
+
+`demo_support.stop_reason()` classifies a finished run against this list. The trace capture and
+the demo use it.

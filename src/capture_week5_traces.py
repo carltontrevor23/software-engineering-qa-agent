@@ -1,448 +1,233 @@
 """
 src/capture_week5_traces.py
 
-SUPERSEDED (Week 4 realignment): this script drives the removed subscription tools
-and no longer runs. It is rewritten for the QA agent in the Week 5 realignment.
+Week 5 (realigned): capture three execution traces of the bounded QA agent.
 
-Week 5 Activity 5: Capture live execution traces for the Bounded User Subscription Agent.
-Executes multi-step decision workflows against the real Gemini model (gemini-3.6-flash)
-via LangGraph, logging node-by-node state transitions, tool calls, observations,
-human approval events, and termination conditions.
+  T1  REQ-2.1 on the correct SUT. Whatever really happens is recorded: a pass, or a
+      "test defect" if a generated test is wrong.
+  T2  REQ-2.1 with the planted boundary defect: failure -> draft -> approval -> filed.
+  T3  Failure/recovery: same as T2, but the human REJECTS file_issue. The agent stops
+      with human_rejection and nothing new appears in evidence/issues/filed/.
+
+Each scenario runs against the live Gemini model. Only if a live run fails (quota,
+network, key) is it re-run with the scripted LLM; the mode used is recorded per trace.
+Approvals use approval.set_approval_hook, and every decision is logged.
 
 Outputs:
-  - Structured JSONL log:  evidence/traces/week5_live_traces.jsonl
-  - Human-readable report: evidence/week5_live_execution_traces.md
+  - evidence/traces/week5_live_traces.jsonl
+  - evidence/week5_live_execution_traces.md
+
+Run:  python src/capture_week5_traces.py
 """
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import sys
-import json
-import time
-import tempfile
+import traceback
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-from unittest.mock import patch
+from pathlib import Path
+from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-import requests
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from model_client import MODEL_NAME
-import subscription_manager as sm
 import approval
+import demo_support
+import qa_tools
 import tool_calling
-from tool_calling import (
-    MAX_HOPS,
-    _FakeResponse,
-    graph,
-)
 
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-TRACES_JSONL_PATH = os.path.join(ROOT_DIR, "evidence", "traces", "week5_live_traces.jsonl")
-TRACES_MD_PATH = os.path.join(ROOT_DIR, "evidence", "week5_live_execution_traces.md")
+ROOT_DIR = Path(__file__).resolve().parent.parent
+TRACES_JSONL_PATH = ROOT_DIR / "evidence" / "traces" / "week5_live_traces.jsonl"
+TRACES_MD_PATH = ROOT_DIR / "evidence" / "week5_live_execution_traces.md"
+PROMPT = "Check REQ-2.1 (Tier Upgrades) against the code."
+
+SCENARIOS = [
+    {"id": "T1", "title": "Correct SUT", "planted_bug": False, "approve": True,
+     "description": "REQ-2.1 against the unmodified SUT. Expected: tests pass and the agent stops "
+                    "without drafting an issue (or reports a test defect if a generated test is wrong)."},
+    {"id": "T2", "title": "Planted defect, human approves", "planted_bug": True, "approve": True,
+     "description": "REQ-2.1 with 'balance <' changed to 'balance <=' in a temporary SUT copy. Expected: "
+                    "boundary test fails -> draft_issue -> human approves -> file_issue succeeds."},
+    {"id": "T3", "title": "Planted defect, human rejects (failure/recovery)", "planted_bug": True, "approve": False,
+     "description": "Same as T2, but the human rejects file_issue. Expected: the agent stops with "
+                    "human_rejection and nothing is filed."},
+]
 
 
-class TraceCollector:
-    """Collects node-by-node execution details from live LangGraph stream."""
+@contextlib.contextmanager
+def _swap(module: Any, name: str, value: Any):
+    saved = getattr(module, name)
+    setattr(module, name, value)
+    try:
+        yield
+    finally:
+        setattr(module, name, saved)
 
-    def __init__(self, scenario_id: str, title: str, description: str):
-        self.scenario_id = scenario_id
-        self.title = title
-        self.description = description
-        self.prompt: str = ""
-        self.steps: List[Dict[str, Any]] = []
-        self.approval_events: List[Dict[str, Any]] = []
-        self.final_answer: str = ""
-        self.ledger_written: bool = False
-        self.total_hops: int = 0
-        self.status: str = "running"
-        self.start_time: str = datetime.now(timezone.utc).isoformat()
-        self.end_time: str = ""
 
-    def log_step(
-        self,
-        step_number: int,
-        node: str,
-        phase: str,
-        summary: str,
-        payload: Optional[Dict[str, Any]] = None,
-        hops: Optional[int] = None,
-    ) -> None:
-        entry = {
-            "step": step_number,
-            "node": node,
-            "phase": phase,
-            "summary": summary,
-            "payload": payload or {},
-            "hops": hops,
-        }
-        self.steps.append(entry)
+def _filed() -> set:
+    folder = qa_tools.ISSUES_DIR / "filed"
+    return {p.name for p in folder.glob("*.md")} if folder.exists() else set()
 
-    def log_approval(
-        self, tool_name: str, arguments: Dict[str, Any], decision: bool, reason: str = ""
-    ) -> None:
-        self.approval_events.append({
+
+def run_scenario(scenario: Dict[str, Any], offline: bool) -> Dict[str, Any]:
+    approvals: List[Dict[str, Any]] = []
+
+    def hook(tool_name: str, arguments: Dict[str, Any]) -> bool:
+        decision = scenario["approve"]
+        approvals.append({
             "tool_name": tool_name,
             "arguments": arguments,
             "decision": "APPROVED" if decision else "REJECTED",
-            "reason": reason,
+            "time_utc": datetime.now(timezone.utc).isoformat(),
         })
-
-    def complete(self, final_answer: str, ledger_written: bool, total_hops: int, status: str = "completed") -> None:
-        self.final_answer = final_answer
-        self.ledger_written = ledger_written
-        self.total_hops = total_hops
-        self.status = status
-        self.end_time = datetime.now(timezone.utc).isoformat()
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "scenario_id": self.scenario_id,
-            "title": self.title,
-            "description": self.description,
-            "start_time_utc": self.start_time,
-            "end_time_utc": self.end_time,
-            "model": MODEL_NAME,
-            "max_hops": MAX_HOPS,
-            "total_hops": self.total_hops,
-            "prompt": self.prompt,
-            "status": self.status,
-            "ledger_written": self.ledger_written,
-            "human_approval_events": self.approval_events,
-            "steps": self.steps,
-            "final_answer": self.final_answer,
-        }
-
-
-def extract_text(content: Any) -> str:
-    """Extract clean string content whether AIMessage.content is str or list of blocks."""
-    if isinstance(content, list):
-        return "".join(
-            (b.get("text", "") if isinstance(b, dict) else str(b))
-            for b in content
-        )
-    return str(content or "")
-
-
-def run_scenario(
-    collector: TraceCollector,
-    prompt: str,
-    ledger_dir: str,
-    mock_get_setup: Any,
-    approval_decision: bool = True,
-    target_user_id: str = "u123",
-) -> TraceCollector:
-    """Executes a single scenario through the real LangGraph graph using live Gemini."""
-    collector.prompt = prompt
-    print("\n" + "=" * 76)
-    print(f"[{collector.scenario_id}] {collector.title}")
-    print("=" * 76)
-    print(f"Goal/Prompt: \"{prompt}\"")
-    print(f"Context: {collector.description}\n")
-
-    def approval_callback(tool_name: str, arguments: Dict[str, Any]) -> bool:
-        decision = approval_decision
-        print(f"  --> HUMAN GATE: {tool_name}({arguments}) -> {'APPROVED' if decision else 'REJECTED'}")
-        collector.log_approval(tool_name, arguments, decision)
+        print(f"  --> HUMAN GATE: {tool_name} -> {'APPROVED' if decision else 'REJECTED'}")
         return decision
 
-    approval.set_approval_hook(approval_callback)
+    filed_before = _filed()
+    started = datetime.now(timezone.utc).isoformat()
+    with contextlib.ExitStack() as stack:
+        approval.set_approval_hook(hook)
+        stack.callback(approval.set_approval_hook, None)
+        if offline:
+            stack.enter_context(_swap(tool_calling, "llm_with_tools", demo_support.ScriptedLLM()))
+            stack.enter_context(_swap(qa_tools, "get_model_response", demo_support.fixture_model_reply))
+        if scenario["planted_bug"]:
+            stack.enter_context(demo_support.planted_bug_sut())
+        final_state, steps = demo_support.trace_run(
+            tool_calling.graph, PROMPT, printer=lambda s: print("  " + s),
+            initial_state=tool_calling.initial_state(PROMPT),
+        )
 
+    replies = [m for m in final_state["messages"]
+               if type(m).__name__ == "AIMessage" and m.content and not m.tool_calls]
+    answer = demo_support._text(replies[-1].content).strip() if replies else tool_calling.STOPPED_MESSAGE
+    newly_filed = sorted(_filed() - filed_before)
+    return {
+        "scenario_id": scenario["id"],
+        "title": scenario["title"],
+        "description": scenario["description"],
+        "mode": "offline_scripted_llm" if offline else "live_gemini",
+        "model": "ScriptedLLM + demo/fixtures/req_2_1_tests.py" if offline else tool_calling.MODEL_NAME,
+        "prompt_version": tool_calling.PROMPT_VERSION,
+        "prompt": PROMPT,
+        "planted_bug": scenario["planted_bug"],
+        "max_hops": tool_calling.MAX_HOPS,
+        "total_hops": final_state.get("hops", 0),
+        "start_time_utc": started,
+        "end_time_utc": datetime.now(timezone.utc).isoformat(),
+        "tool_sequence": [s["tool"] for s in steps if s["action"] == "call_tool"],
+        "human_approval_events": approvals,
+        "issues_filed_during_run": newly_filed,
+        "stop_reason": demo_support.stop_reason(final_state),
+        "final_answer": answer,
+        "steps": steps,
+    }
+
+
+def capture(scenario: Dict[str, Any]) -> Dict[str, Any]:
+    print("\n" + "=" * 76)
+    print(f"[{scenario['id']}] {scenario['title']}")
+    print("=" * 76)
     try:
-        with patch.object(tool_calling.manager, "ledger_dir", ledger_dir), \
-             patch.object(sm.requests, "get") as mock_get:
-            
-            if callable(mock_get_setup):
-                mock_get.side_effect = mock_get_setup
-            elif isinstance(mock_get_setup, list):
-                mock_get.side_effect = mock_get_setup
-            else:
-                mock_get.return_value = mock_get_setup
-
-            initial_state = {"messages": [HumanMessage(content=prompt)], "hops": 0}
-            print(f"  Step 0 [START] SENSE: User asks: \"{prompt}\"")
-            collector.log_step(
-                step_number=0,
-                node="START",
-                phase="SENSE",
-                summary=f"User asks: \"{prompt}\"",
-            )
-
-            step_idx = 0
-            final_state = initial_state
-            hops_count = 0
-
-            for mode, chunk in graph.stream(initial_state, stream_mode=["updates", "values"]):
-                if mode == "values":
-                    final_state = chunk
-                    continue
-
-                for node_name, delta in chunk.items():
-                    step_idx += 1
-                    current_hops = delta.get("hops", hops_count)
-                    if "hops" in delta:
-                        hops_count = delta["hops"]
-
-                    for msg in delta.get("messages", []):
-                        if isinstance(msg, AIMessage) and msg.tool_calls:
-                            call = msg.tool_calls[0]
-                            summary = f"PLAN/ACT: Model calls tool '{call['name']}' with args {call['args']}"
-                            print(f"  Step {step_idx} [{node_name:<13}] {summary}")
-                            collector.log_step(
-                                step_number=step_idx,
-                                node=node_name,
-                                phase="PLAN/ACT",
-                                summary=summary,
-                                payload={"tool_name": call["name"], "args": call["args"]},
-                                hops=hops_count,
-                            )
-                        elif isinstance(msg, AIMessage):
-                            text_body = extract_text(msg.content).strip()
-                            summary = f"STOP: Model produces terminal response: \"{text_body}\""
-                            print(f"  Step {step_idx} [{node_name:<13}] {summary}")
-                            collector.log_step(
-                                step_number=step_idx,
-                                node=node_name,
-                                phase="STOP",
-                                summary=summary,
-                                payload={"content": text_body},
-                                hops=hops_count,
-                            )
-                        elif isinstance(msg, ToolMessage):
-                            summary = f"OBSERVE: Tool '{msg.name}' returned payload: {msg.content}"
-                            print(f"  Step {step_idx} [{node_name:<13}] {summary} (hops: {hops_count}/{MAX_HOPS})")
-                            collector.log_step(
-                                step_number=step_idx,
-                                node=node_name,
-                                phase="OBSERVE",
-                                summary=summary,
-                                payload={"tool_name": msg.name, "result": msg.content},
-                                hops=hops_count,
-                            )
-
-            # Determine final answer
-            final_answer = ""
-            final_replies = [m for m in final_state["messages"] if isinstance(m, AIMessage) and m.content]
-            if final_replies:
-                final_answer = extract_text(final_replies[-1].content)
-            elif not isinstance(final_state["messages"][-1], AIMessage):
-                final_answer = tool_calling.STOPPED_MESSAGE
-
-            ledger_file = os.path.join(ledger_dir, f"{target_user_id}.json")
-            ledger_written = os.path.exists(ledger_file)
-
-            collector.complete(
-                final_answer=final_answer,
-                ledger_written=ledger_written,
-                total_hops=hops_count,
-                status="completed",
-            )
-
-            print(f"\n  [VERIFICATION]")
-            print(f"  - Human Approval Invocations: {len(collector.approval_events)}")
-            print(f"  - Ledger Persisted ({target_user_id}.json): {ledger_written}")
-            print(f"  - Total Hops: {hops_count}/{MAX_HOPS}")
-            print(f"  - Final Answer: {final_answer.strip()}")
-
-    finally:
-        approval.set_approval_hook(None)
-
-    return collector
+        return run_scenario(scenario, offline=False)
+    except Exception as e:  # live model failed: record why, then fall back
+        print(f"  Live run failed ({type(e).__name__}: {e}). Re-running with the scripted LLM.")
+        record = run_scenario(scenario, offline=True)
+        record["live_failure"] = f"{type(e).__name__}: {e}"
+        record["live_failure_traceback"] = traceback.format_exc(limit=3)
+        return record
 
 
-def write_traces_to_jsonl(collectors: List[TraceCollector], output_path: str) -> None:
-    """Appends structured trace records to JSONL file."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "a", encoding="utf-8") as f:
-        for collector in collectors:
-            record = collector.to_dict()
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"\n[OK] Appended {len(collectors)} trace records to JSONL: {output_path}")
+def _cell(value: Any) -> str:
+    text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value or "")
+    text = text.replace("|", "\\|").replace("\n", " ")
+    return text if len(text) <= 160 else text[:160] + "..."
 
 
-def write_traces_to_markdown(collectors: List[TraceCollector], output_path: str) -> None:
-    """Generates an evidence report in Markdown."""
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
+def write_markdown(records: List[Dict[str, Any]]) -> None:
     lines = [
-        "# Week 5: Live Agent Execution Traces Evidence",
+        "# Week 5 (realigned): Bounded QA Agent Execution Traces",
         "",
-        f"**Generated:** {now_str}  ",
-        f"**Model:** `{MODEL_NAME}` (Live Google Gemini via `ChatGoogleGenerativeAI`)  ",
-        f"**Framework:** LangGraph `StateGraph(AgentState)`  ",
-        f"**Bounds:** `MAX_HOPS = {MAX_HOPS}`, Single-Use HMAC-SHA256 Human Approval Gate  ",
+        f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  ",
+        f"**Agent prompt:** `prompts/agent_system_prompt_{tool_calling.PROMPT_VERSION}.txt`  ",
+        f"**Limits:** `MAX_HOPS = {tool_calling.MAX_HOPS}`, `MAX_CALLS_PER_STEP = {tool_calling.MAX_CALLS_PER_STEP}`  ",
+        "**Script:** `src/capture_week5_traces.py` (structured records in `evidence/traces/week5_live_traces.jsonl`)",
         "",
-        "---",
+        "Each trace shows, per hop, the graph node, the tool and its arguments, the tool's `status` / "
+        "`test_outcome`, and the latency since the previous step. `mode` says whether the live Gemini "
+        "model or the offline scripted LLM produced the decisions.",
         "",
-        "## Executive Summary",
-        "",
-        "This document presents end-to-end execution traces captured from the live `tool_calling.graph` orchestration loop.",
-        "Unlike mock or unit-test replay scripts, all decisions, tool invocations, and text outputs in these traces were",
-        f"autonomously produced by the live `{MODEL_NAME}` model responding to the multi-step control policy.",
-        "",
-        "The traces validate all four required control loop stages and boundary guarantees:",
-        "1. **Sense $\\rightarrow$ Context**: Querying read-only state before taking action.",
-        "2. **Plan $\\rightarrow$ Decide**: Discerning eligibility from tool payloads prior to requesting high-impact mutation.",
-        "3. **Act $\\rightarrow$ Tool**: Intercepting state-changing mutations with human authorization and signed cryptographic tokens.",
-        "4. **Observe $\\rightarrow$ Stop/Re-plan**: Resilient error recovery, structured failure handling, and bounded hop termination.",
-        "",
-        "---",
+        "| Trace | Mode | Tool sequence | Approval | Filed | Stop reason |",
+        "|---|---|---|---|---|---|",
     ]
+    for r in records:
+        decisions = ", ".join(a["decision"] for a in r["human_approval_events"]) or "none"
+        lines.append(
+            f"| {r['scenario_id']} | `{r['mode']}` | {' -> '.join(r['tool_sequence'])} | {decisions} | "
+            f"{len(r['issues_filed_during_run'])} | `{r['stop_reason']}` |"
+        )
+    lines += ["", "---"]
 
-    for collector in collectors:
-        c = collector.to_dict()
-        lines.extend([
-            f"## {c['scenario_id']}: {c['title']}",
+    for r in records:
+        lines += [
             "",
-            f"**Objective:** {c['description']}  ",
-            f"**User Prompt:** `\"{c['prompt']}\"`  ",
-            f"**Model Used:** `{c['model']}`  ",
-            f"**Execution Status:** `{c['status'].upper()}` | **Total Hops:** `{c['total_hops']}/{c['max_hops']}`  ",
-            f"**Ledger Written:** `{c['ledger_written']}` | **Human Approvals:** `{len(c['human_approval_events'])}`  ",
+            f"## {r['scenario_id']}: {r['title']}",
             "",
-            "### Step-by-Step Control Loop Trace",
+            f"**Scenario:** {r['description']}  ",
+            f"**Mode:** `{r['mode']}` | **Model:** `{r['model']}` | **Planted bug:** `{r['planted_bug']}`  ",
+            f"**Prompt:** \"{r['prompt']}\"  ",
+            f"**Hops used:** {r['total_hops']}/{r['max_hops']} | **Stop reason:** `{r['stop_reason']}`  ",
+        ]
+        if r.get("live_failure"):
+            lines.append(f"**Live run failed, fell back to offline:** `{_cell(r['live_failure'])}`  ")
+        lines += [
             "",
-            "| Step | Graph Node | Loop Phase | Action / Observation Summary |",
-            "|---|---|---|---|",
-        ])
-
-        for s in c["steps"]:
-            clean_summary = s["summary"].replace("|", "\\|").replace("\n", " ")
-            lines.append(f"| {s['step']} | `{s['node']}` | **{s['phase']}** | {clean_summary} |")
-
-        lines.append("")
-
-        if c["human_approval_events"]:
-            lines.extend([
-                "### Human-in-the-Loop Approval Event",
-                "",
-            ])
-            for ev in c["human_approval_events"]:
-                lines.extend([
-                    f"- **Tool Requested:** `{ev['tool_name']}`",
-                    f"- **Arguments:** `{json.dumps(ev['arguments'])}`",
-                    f"- **Operator Gate Decision:** `{ev['decision']}`",
-                    "",
-                ])
-
-        lines.extend([
-            "### Final Agent Output",
+            "| Hop | Node | Step | Tool | Args / result | Status | Test outcome | Latency (s) |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for s in r["steps"]:
+            detail = s.get("args") if s["action"] == "call_tool" else s.get("text") if s["action"] == "final_answer" else s.get("result")
+            if s["action"] == "tool_result" and isinstance(detail, dict):
+                detail = {k: v for k, v in detail.items() if k not in ("status", "test_outcome")}
+            lines.append(
+                f"| {s['hop']} | `{s['node']}` | {s['action']} | {s.get('tool', '')} | {_cell(detail)} | "
+                f"{s.get('status') or ''} | {s.get('test_outcome') or ''} | {s['latency_s']} |"
+            )
+        lines += ["", "**Human approval events:**", ""]
+        if r["human_approval_events"]:
+            for a in r["human_approval_events"]:
+                lines.append(f"- `{a['tool_name']}` on `{Path(str(a['arguments'].get('draft_path', ''))).name}` -> **{a['decision']}**")
+        else:
+            lines.append("- none (no high-impact tool was requested)")
+        lines += [
             "",
-            "> " + c["final_answer"].replace("\n", "\n> "),
+            f"**Issues filed during this run:** {', '.join(r['issues_filed_during_run']) or 'none'}",
             "",
-            "### Boundary & Policy Verification",
+            "**Final answer:**",
             "",
-            f"- **Sense Preceded Mutation:** Verified (Tool `get_user_subscription_status` inspected before any mutation).",
-            f"- **Human Approval Gate Enforced:** {'Triggered and approved' if c['human_approval_events'] else 'Bypassed appropriately (no high-impact tool called)'}.",
-            f"- **Ledger Mutation Status:** {'Updated atomically on disk' if c['ledger_written'] else 'Unmodified (no unauthorized side effect)'}.",
+            "> " + r["final_answer"].replace("\n", "\n> "),
             "",
             "---",
-            "",
-        ])
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-    print(f"[OK] Generated Markdown evidence report: {output_path}")
+        ]
+    TRACES_MD_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def main() -> None:
-    temp_dir = tempfile.mkdtemp(prefix="week5_live_ledgers_")
-    collectors: List[TraceCollector] = []
-
-    # Reset output jsonl for clean capture
-    if os.path.exists(TRACES_JSONL_PATH):
-        os.remove(TRACES_JSONL_PATH)
-
-    print("=" * 76)
-    print("WEEK 5: LIVE AGENT EXECUTION TRACE CAPTURE (3 SCENARIOS)")
-    print(f"Model: {MODEL_NAME} | Graph: tool_calling.graph | Max Hops: {MAX_HOPS}")
-    print(f"Ledger Scratch: {temp_dir}")
-    print("=" * 76)
-
-    # -----------------------------------------------------------------
-    # Scenario 1: Eligible User Upgrade (Happy Path)
-    # -----------------------------------------------------------------
-    c1 = TraceCollector(
-        scenario_id="TRACE-01",
-        title="Eligible User — Status Verified, Approved by Human Gate, Upgraded",
-        description="User u123 is active on STANDARD tier with $100.00 balance. The agent senses status first, evaluates balance >= $50, plans upgrade, requests human approval, and persists new tier."
-    )
-    mock_resp_1 = _FakeResponse(200, {"status": "active", "tier": "STANDARD", "balance": 100.0})
-    run_scenario(
-        collector=c1,
-        prompt="Please upgrade user u123 to premium.",
-        ledger_dir=temp_dir,
-        mock_get_setup=mock_resp_1,
-        approval_decision=True,
-        target_user_id="u123",
-    )
-    collectors.append(c1)
-    write_traces_to_jsonl([c1], TRACES_JSONL_PATH)
-    write_traces_to_markdown(collectors, TRACES_MD_PATH)
-
-    # Rate-limit safety pause
-    print("\n[PAUSE] Waiting 15s before next scenario to respect rate limits...")
-    time.sleep(15)
-
-    # -----------------------------------------------------------------
-    # Scenario 2: Ineligible User (Precondition Refusal)
-    # -----------------------------------------------------------------
-    c2 = TraceCollector(
-        scenario_id="TRACE-02",
-        title="Ineligible User (Insufficient Funds) — Refused Early Without Approval",
-        description="User u_poor is active on STANDARD tier with only $25.50 balance. The agent senses status, observes balance < $50.00, refuses immediately with explanation, and NEVER calls high-impact upgrade tool."
-    )
-    mock_resp_2 = _FakeResponse(200, {"status": "active", "tier": "STANDARD", "balance": 25.50})
-    run_scenario(
-        collector=c2,
-        prompt="Please upgrade user u_poor to premium.",
-        ledger_dir=temp_dir,
-        mock_get_setup=mock_resp_2,
-        approval_decision=True,
-        target_user_id="u_poor",
-    )
-    collectors.append(c2)
-    write_traces_to_jsonl([c2], TRACES_JSONL_PATH)
-    write_traces_to_markdown(collectors, TRACES_MD_PATH)
-
-    # Rate-limit safety pause
-    print("\n[PAUSE] Waiting 15s before next scenario to respect rate limits...")
-    time.sleep(15)
-
-    # -----------------------------------------------------------------
-    # Scenario 3: Service Outage Mid-Loop (Failure and Recovery Case)
-    # -----------------------------------------------------------------
-    c3 = TraceCollector(
-        scenario_id="TRACE-03",
-        title="Mid-Loop Service Outage — Structured Error Catch and Graceful Recovery",
-        description="User u456 passes initial lookup with $80.00 balance. During upgrade execution, external API raises ConnectionError. Tool returns structured error; agent observes error, avoids retry loops, reports outage to user, and stops safely."
-    )
-    mock_resp_3 = [
-        _FakeResponse(200, {"status": "active", "tier": "STANDARD", "balance": 80.0}),
-        requests.exceptions.ConnectionError("Connection reset by peer (simulated outage)"),
-    ]
-    run_scenario(
-        collector=c3,
-        prompt="Please upgrade user u456 to premium.",
-        ledger_dir=temp_dir,
-        mock_get_setup=mock_resp_3,
-        approval_decision=True,
-        target_user_id="u456",
-    )
-    collectors.append(c3)
-    write_traces_to_jsonl([c3], TRACES_JSONL_PATH)
-    write_traces_to_markdown(collectors, TRACES_MD_PATH)
-
-    print("\n" + "=" * 76)
-    print("ALL 3 REQUIRED WEEK 5 LIVE TRACES CAPTURED AND RECORDED SUCCESSFULLY!")
-    print(f"JSONL Log: {TRACES_JSONL_PATH}")
-    print(f"Report:    {TRACES_MD_PATH}")
-    print("=" * 76)
+def main() -> int:
+    print(f"Model: {tool_calling.MODEL_NAME} | prompt {tool_calling.PROMPT_VERSION} | MAX_HOPS {tool_calling.MAX_HOPS}")
+    records = [capture(s) for s in SCENARIOS]
+    TRACES_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(TRACES_JSONL_PATH, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    write_markdown(records)
+    print(f"\n[OK] {len(records)} traces -> {TRACES_JSONL_PATH} and {TRACES_MD_PATH}")
+    for r in records:
+        print(f"  {r['scenario_id']}: mode={r['mode']} stop={r['stop_reason']} "
+              f"tools={' -> '.join(r['tool_sequence'])} filed={len(r['issues_filed_during_run'])}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

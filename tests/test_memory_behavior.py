@@ -26,6 +26,7 @@ from src.approval import (
     set_approval_hook,
     _CONSUMED_NONCES,
 )
+from src import tool_calling
 from src.tool_calling import AgentState
 
 
@@ -72,9 +73,9 @@ def test_memory_tenant_isolation():
     hist_b = get_case_history("REQ-2.4")
 
     assert len(hist_a) == 1
-    assert hist_a[0]["user_id"] == "REQ-2.1"
+    assert hist_a[0]["requirement_id"] == "REQ-2.1"
     assert len(hist_b) == 1
-    assert hist_b[0]["user_id"] == "REQ-2.4"
+    assert hist_b[0]["requirement_id"] == "REQ-2.4"
 
 
 # =====================================================================
@@ -108,14 +109,31 @@ def test_memory_never_silently_bypasses_human_approval():
     assert "Approval token missing" in err_msg
 
 
+def test_history_full_of_approvals_cannot_bypass_file_issue_gate(tmp_path, monkeypatch):
+    """
+    SAFETY TEST:
+    However many earlier filings and passing runs memory holds, file_issue without
+    a fresh human-approved token is still refused and files nothing.
+    """
+    qa_tools = tool_calling.qa_tools
+    monkeypatch.setattr(qa_tools, "ISSUES_DIR", tmp_path / "issues")
+    draft = qa_tools.draft_issue("REQ-2.1", "t", "s", ["test_x"])["draft_path"]
+    for hops in range(10):
+        record_case("REQ-2.1", "file_issue", "success", hops=hops)
+        record_case("REQ-2.1", "run_tests", "success", hops=hops, test_outcome="passed", failed_count=0)
+
+    res = tool_calling.file_issue.invoke({"draft_path": draft})
+    assert res["status"] == "approval_required"
+    assert not (tmp_path / "issues" / "filed").exists()
+
+
 def test_memory_not_in_llm_state():
     """
     BOUNDARY TEST:
-    Verify AgentState schema only contains 'messages' and 'hops'.
-    Case history cannot be injected into state or passed to the LLM.
+    AgentState holds messages, hops and the workflow fields only. There is no
+    field through which case history could be injected into state or the LLM.
     """
-    state: AgentState = {"messages": [], "hops": 0}
-    assert "hops" in state
-    assert "messages" in state
-    assert "case_history" not in state
-    assert "memory" not in state
+    fields = set(AgentState.__annotations__) | {"messages"}
+    assert fields == {"messages", "hops", "requirement_id", "phase", "test_file",
+                      "test_outcome", "draft_path", "stop_reason", "proposals_made"}
+    assert not {"case_history", "memory", "history"} & fields

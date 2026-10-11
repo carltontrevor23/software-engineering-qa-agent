@@ -1,12 +1,17 @@
 """
 src/mcp_server.py
 
-MCP server exposing the Inspectra QA tools (Week 4 realignment: minimal retarget;
-the full interface spec is rewritten in the Week 6 realignment).
+MCP server exposing the Inspectra QA tools (Week 6, realigned).
+Spec: docs/architecture/mcp_interface_spec.md
 
-It reuses tool_calling._run_one_tool(), so the allow-list, case-history
-printout, human approval gate and signed token all behave exactly as they do
-inside the LangGraph agent. Nothing is re-implemented here.
+It reuses the agent's own controls instead of re-implementing them:
+  - tool_calling._run_one_tool(): allow-list, test-run history + advisory printed
+    for the human, the console approval gate, and the signed single-use token;
+  - workflow.check_call()/apply_result(): the same phase guard and file pinning
+    as the LangGraph agent, kept per server session (one requirement at a time);
+  - sandbox.py rules inside run_tests.
+
+Clients can never supply approval tokens; approval happens on this console.
 
 Transport is streamable HTTP, NOT stdio: the approval gate uses input() on this
 terminal, and stdio would use stdin for the MCP protocol itself.
@@ -23,27 +28,41 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from mcp.server.fastmcp import FastMCP
 
+import qa_tools
 import tool_calling
-from memory import record_case
+import workflow
 
 mcp = FastMCP("inspectra-qa")
 
+# One workflow per server session, so a client follows the same phases as the agent.
+_session: Dict[str, Any] = workflow.new_workflow()
+
 
 def _call(tool_name: str, args: Dict[str, Any]):
-    # approval_token is deliberately NOT accepted from clients:
-    # _run_one_tool mints it after a real human approval on this console.
-    result = tool_calling._run_one_tool(tool_name, dict(args))
-    status = result.get("status", "unknown") if isinstance(result, dict) else "unknown"
-    record_case(tool_calling.qa_tools.requirement_id_from_args(args), tool_name, status, 0)
-    return result
+    blocked = workflow.check_call(_session, tool_name, args)
+    if blocked:
+        return {"status": "error", "error": blocked, "phase": _session["phase"]}
+    result = tool_calling._run_one_tool(tool_name, dict(args), requirement_id=_session["requirement_id"])
+    _session.update(workflow.apply_result(_session, tool_name, result))
+    key = _session["requirement_id"] or qa_tools.requirement_id_from_args(args)
+    tool_calling._record(key, tool_name, result, 0)
+    return {**result, "phase": _session["phase"]} if isinstance(result, dict) else result
 
 
-def _refuse_client_token(tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
-    record_case(tool_calling.qa_tools.requirement_id_from_args(args), tool_name, "approval_required", 0)
+def _refuse_client_token() -> Dict[str, Any]:
     return {
         "status": "error",
         "error": "Client-supplied approval tokens are not accepted. Approval is minted server-side after human confirmation.",
+        "phase": _session["phase"],
     }
+
+
+@mcp.tool()
+def start_check() -> dict:
+    """Start a new requirement check (resets the workflow to phase START)."""
+    _session.clear()
+    _session.update(workflow.new_workflow())
+    return {"status": "success", "phase": _session["phase"]}
 
 
 @mcp.tool()
@@ -60,7 +79,7 @@ def propose_tests(requirement_id: str) -> dict:
 
 @mcp.tool()
 def run_tests(requirement_id: str, test_file: str) -> dict:
-    """Run an allowed test file in the sandbox (no shell, timeout, no secrets)."""
+    """Run the test file proposed in this session, in the sandbox (no shell, timeout, no secrets)."""
     return _call("run_tests", {"requirement_id": requirement_id, "test_file": test_file})
 
 
@@ -77,17 +96,17 @@ def draft_issue(requirement_id: str, title: str, summary: str, failing_tests: Li
 
 @mcp.tool()
 def file_issue(draft_path: str, approval_token: Optional[str] = None) -> dict:
-    """File a drafted issue. Requires human approval on the server console."""
+    """File the draft written in this session. Requires human approval on the server console."""
     if approval_token is not None:
-        return _refuse_client_token("file_issue", {"draft_path": draft_path})
+        return _refuse_client_token()
     return _call("file_issue", {"draft_path": draft_path})
 
 
 @mcp.tool()
 def save_test_to_suite(test_file: str, approval_token: Optional[str] = None) -> dict:
-    """Add a generated test to sut/tests. Requires human approval on the server console."""
+    """Add the passing generated test to sut/tests. Requires human approval on the server console."""
     if approval_token is not None:
-        return _refuse_client_token("save_test_to_suite", {"test_file": test_file})
+        return _refuse_client_token()
     return _call("save_test_to_suite", {"test_file": test_file})
 
 

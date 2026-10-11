@@ -12,12 +12,15 @@ expected failures. src/tool_calling.py wraps these as LangChain tools.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import secrets
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import requests
 
 import sandbox
 from approval import verify_and_consume_token
@@ -30,6 +33,10 @@ ISSUES_DIR = PROJECT_ROOT / "evidence" / "issues"
 PROMPT_TEMPLATE = PROJECT_ROOT / "prompts" / "v1.1_test_proposal.txt"
 PROMPT_ADDENDUM = PROJECT_ROOT / "prompts" / "v1.1_pytest_output_addendum.txt"
 PROMPT_VERSION = "v1.1+pytest-addendum-v1"
+# GitHub Issues integration for file_issue; used only when GITHUB_TOKEN and GITHUB_REPO are set.
+GITHUB_API = "https://api.github.com/repos/{repo}/issues"
+GITHUB_LABELS = ["inspectra-qa"]
+GITHUB_TIMEOUT_SECONDS = 15
 SUT_MODULE = Path("subscription_service") / "subscription_manager.py"
 SUT_IMPORT_LINE = (
     "from subscription_service.subscription_manager import (SubscriptionManager, "
@@ -241,6 +248,10 @@ def file_issue(draft_path: str, approval_token: Optional[str] = None) -> Dict[st
     source = Path(draft_path)
     if not _inside(source, ISSUES_DIR / "drafts") or not source.is_file():
         return {"status": "error", "error": "draft_path must be an existing draft in evidence/issues/drafts."}
+
+    token, repo = os.getenv("GITHUB_TOKEN"), os.getenv("GITHUB_REPO")
+    if token and repo:
+        return _file_on_github(source, token, repo)
     try:
         filed_dir = ISSUES_DIR / "filed"
         filed_dir.mkdir(parents=True, exist_ok=True)
@@ -249,6 +260,29 @@ def file_issue(draft_path: str, approval_token: Optional[str] = None) -> Dict[st
     except OSError:
         return {"status": "error", "error": "Could not file the issue, action not completed."}
     return {"status": "success", "filed_path": str(filed_path), "channel": "local"}
+
+
+def _file_on_github(source: Path, token: str, repo: str) -> Dict[str, Any]:
+    """POST the draft to GitHub Issues. The token is only ever sent in the header;
+    it is never logged or returned. On failure the draft is kept and nothing is filed locally."""
+    body = source.read_text(encoding="utf-8")
+    first_line = body.splitlines()[0] if body else ""
+    title = first_line.lstrip("#").strip() or source.stem
+    try:
+        response = requests.post(
+            GITHUB_API.format(repo=repo),
+            json={"title": title, "body": body, "labels": GITHUB_LABELS},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=GITHUB_TIMEOUT_SECONDS,
+        )
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "error": f"GitHub unreachable ({type(e).__name__}); draft kept at {source.name}."}
+    if response.status_code != 201:
+        return {"status": "error", "error": f"GitHub returned HTTP {response.status_code}; draft kept at {source.name}."}
+    return {"status": "success", "channel": "github", "issue_url": response.json().get("html_url")}
 
 
 def save_test_to_suite(test_file: str, approval_token: Optional[str] = None) -> Dict[str, Any]:
