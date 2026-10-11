@@ -1,521 +1,224 @@
-# Tool Catalogue — Week 4
+# Tool Catalogue — Week 4 (realigned)
 
-Project: Software-Engineering QA Agent (Inspectra)
-============================================================
-Tool 1: get_user_subscription_status
-============================================================
+**Project:** Software-Engineering QA Agent (Inspectra)
+**Code:** implementations in [`src/qa_tools.py`](../../src/qa_tools.py) and [`src/sandbox.py`](../../src/sandbox.py); LangChain wrappers in [`src/tool_calling.py`](../../src/tool_calling.py)
+**Tests:** [`tests/test_tool_failures.py`](../../tests/test_tool_failures.py)
 
-Purpose
--------
-Read-only lookup of a user's current subscription metadata (tier,
-status, balance). Used when the agent needs to answer a question
-about a user's account, or needs current state before deciding
-whether a higher-impact action (like an upgrade) is even valid to
-attempt.
+This catalogue replaces the Week 4 subscription-tool catalogue (`get_user_subscription_status`,
+`upgrade_user_subscription`), which made the agent *operate* the subscription service instead
+of *testing* it. That version is in git history.
 
-Wraps: SubscriptionManager.fetch_user_data()
+## Workflow and impact levels
 
-Risk level: Low. No side effects, no writes, read-only.
+```
+search_requirements -> propose_tests -> run_tests -> draft_issue -> file_issue
+                                                  \-> save_test_to_suite (optional)
+```
 
-Input Schema
-------------
+| Tool | Impact | Authorization | Side effect |
+|---|---|---|---|
+| `search_requirements` | Low | Automatic | None (read-only) |
+| `propose_tests` | Low | Automatic | Writes one file to `sandbox/generated/` (git-ignored scratch) |
+| `run_tests` | Low | Automatic, sandboxed | Runs pytest in a separate process |
+| `draft_issue` | Low | Automatic | Writes one Markdown draft to `evidence/issues/drafts/` |
+| `file_issue` | **High** | Human approval + signed single-use token | Files the issue (`evidence/issues/filed/`) |
+| `save_test_to_suite` | **High** | Human approval + signed single-use token | Copies a test into `sut/tests/` (a repo change) |
+
+Common result rules:
+- Every tool returns a dict with `status`: `success`, `error` or `approval_required`.
+  `status` is the tool's own outcome. `run_tests` reports the tests' result separately in `test_outcome`.
+- Expected failures never raise: they return `{"status": "error", "error": "<reason>"}`.
+- Missing or wrongly typed arguments are rejected by the Pydantic schema before the tool runs.
+- Only these six tools exist. Any other tool name is refused by the allow-list in `_run_one_tool`.
+- The agent may not merge, deploy, read secrets, run arbitrary shell commands or edit the
+  SUT source (`sut/subscription_service/`). No tool offers those actions.
+
+Requirement IDs come from the headings in `docs/requirements/*.md`: `## Section 2.1: Tier Upgrades`
+becomes `REQ-2.1`. The mapping is deterministic (no LLM).
+
+---
+
+## 1. `search_requirements` — low impact
+
+**Purpose:** find the requirement a developer is asking about (Week 3 BM25 RAG over `docs/requirements/`).
+
+**Input schema**
 ```json
 {
   "type": "object",
   "properties": {
-    "user_id": {
-      "type": "string",
-      "description": "The unique identifier of the user to look up."
-    }
+    "query": {"type": "string", "description": "Free-text search, e.g. 'tier upgrade balance'."},
+    "top_k": {"type": "integer", "default": 3}
   },
-  "required": ["user_id"]
+  "required": ["query"]
 }
 ```
 
-Output Schema
--------------
+**Output schema**
 ```json
 {
-  "type": "object",
-  "properties": {
-    "status": {
-      "type": "string",
-      "enum": ["success", "error"]
-    },
-    "user_id": { "type": "string" },
-    "tier": { "type": "string" },
-    "account_status": { "type": "string" },
-    "balance": { "type": "number" },
-    "error": {
-      "type": ["string", "null"],
-      "description": "Populated only when status is 'error'."
-    }
-  },
-  "required": ["status"]
+  "status": "success | error",
+  "results": [
+    {"requirement_id": "REQ-2.1", "source_file": "docs/requirements/subscription.md",
+     "score": 4.21, "text": "<matching acceptance criterion>"}
+  ],
+  "note": "NO_RELEVANT_REQUIREMENTS_FOUND (only when results is empty)"
 }
 ```
 
-Authorization
--------------
-- Does not require human approval — read-only, no side effects.
-- Still passes through the authorization layer: a caller with role
-  `self` may only look up their own `user_id`; a caller with role
-  `support` may look up any single named `user_id` (never a bulk or
-  unbounded query). A missing caller identity, an unrecognised role,
-  or a `self` caller requesting someone else's `user_id` is denied
-  before the lookup runs, with `{"status": "error", "error": "Not
-  authorized: ..."}`.
-- Does not require the user to be in "active" status to look them up;
-  the point of this tool is to check status, not assume it.
+**Failure behaviour:** no hits returns `success` with an empty list and the note, so the agent
+can say "no requirement found" instead of guessing. A missing corpus returns `error`.
 
-Failure Behaviour
-------------------
-- Arguments fail schema validation (missing `user_id`, wrong type, or
-  an unexpected extra field): return `{"status": "error", "error":
-  "Arguments failed schema validation: ..."}` listing every violation.
-- Caller not authorized for this `user_id`: return `{"status":
-  "error", "error": "Not authorized: <reason>"}`.
-- API returns non-200 (maps to UserNotFoundError in
-  SubscriptionManager.fetch_user_data()): return
-  `{"status": "error", "error": "User not found."}`. Do not retry
-  silently; surface the failure so the agent can decide whether to
-  ask the human for a corrected user_id.
-- Unavailable external API (network/timeout): return
-  `{"status": "error", "error": "User lookup service unavailable, try again later."}`.
-  This is a transient failure, distinct from "user not found."
+---
 
-============================================================
-Tool 2: upgrade_user_subscription
-============================================================
+## 2. `propose_tests` — low impact
 
-Purpose
--------
-Upgrades a user's tier to PREMIUM and deducts the upgrade cost from
-their ledger balance. This is the tool version of the
-process_upgrade() flow already implemented and tested in Week 2.
+**Purpose:** ask Gemini for pytest tests for one requirement and save them in the sandbox.
 
-Wraps: SubscriptionManager.process_upgrade()
+**How:** builds the prompt from `prompts/v1.1_test_proposal.txt`. The `{{module_description}}` is
+the SUT source plus its import line, and `{{requirements_excerpt}}` is the requirement text. It
+then appends `prompts/v1.1_pytest_output_addendum.txt`, which asks for one runnable
+```` ```python ```` block. Calls are logged under prompt version `v1.1+pytest-addendum-v1`.
 
-Risk level: Higher impact. Modifies a user's balance and tier, and
-writes to a persistent ledger file. This is a financial action, not
-a read.
-
-Input Schema
-------------
+**Input schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "user_id": {
-      "type": "string",
-      "description": "The unique identifier of the user to upgrade."
-    },
-    "approval_token": {
-      "type": "string",
-      "description": "A signed, single-use approval token minted by the orchestration layer after a human explicitly confirms this exact action. You cannot generate this token yourself — omit it and the tool will report that approval is required."
-    }
-  },
-  "required": ["user_id"]
-}
+{"type": "object", "properties": {"requirement_id": {"type": "string"}}, "required": ["requirement_id"]}
 ```
-`approval_token` is deliberately NOT in `required`: omitting it must
-reach the tool's own `"approval_required"` response (a distinct,
-recoverable status the agent can act on), not a generic
-schema-validation error. The model is free to include a string here,
-but see Authorization below for why that string is never trusted.
 
-Output Schema
--------------
+**Output schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "status": {
-      "type": "string",
-      "enum": ["success", "error", "approval_required"]
-    },
-    "user_id": { "type": "string" },
-    "new_tier": { "type": "string" },
-    "new_balance": { "type": "number" },
-    "error": {
-      "type": ["string", "null"],
-      "description": "Populated only when status is 'error' or 'approval_required'."
-    }
-  },
-  "required": ["status"]
-}
+{"status": "success | error", "requirement_id": "REQ-2.1",
+ "test_file": "<abs path>/sandbox/generated/test_req_2_1_<8 hex>.py", "test_count": 7}
 ```
 
-Authorization
--------------
-This is the higher-impact action Week 4 requires gating behind human
-approval, since it moves real balance and changes account state. Four
-layers, all independently enforced:
+**Failure behaviour** (nothing is written in any of these cases):
 
-1. **Caller authorization** (src/authorization.py): `self` may only
-   target their own `user_id`; `support` may target any single named
-   `user_id`. Checked in the orchestration layer BEFORE a human is
-   ever interrupted for approval — an unauthorized request never
-   reaches a human approver — and re-checked independently inside
-   `execute_tool()`.
-2. **Human approval, via a real LangGraph pause, then a signed token
-   — never a boolean** (src/agent.py + src/approval.py): the
-   orchestration layer's `execute_tools` graph node calls LangGraph's
-   `interrupt({"tool": ..., "arguments": ...})`, which pauses the
-   ENTIRE graph — the model has no way to fabricate a resume; it isn't
-   part of the conversation the model sees. Something outside the
-   graph (the CLI prompt by default) must call `Command(resume=
-   {"approved": True})` to wake it back up. Only on a real approval is
-   `approval.create_approval_token("upgrade_user_subscription",
-   {"user_id": ...})` called to mint a token — HMAC-signed, bound by
-   hash to that exact `user_id`, expiring after 120 seconds. The
-   model's own `approval_token` argument, if any, is always discarded
-   by the orchestration layer before this point; only a token minted
-   this way is ever attached to the call the tool actually receives.
-   The signed token exists as defense-in-depth ON TOP OF the
-   interrupt: the pause alone proves the graph waited for an external
-   answer, but the token additionally proves that answer was for
-   THESE EXACT arguments and can't be replayed.
-3. **Token verification, inside the tool itself**
-   (`approval.verify_and_consume_token`): re-checks signature,
-   matching tool name, matching arguments (rejects a token approved
-   for one `user_id` being reused for another), expiry, and — via a
-   persisted nonce ledger — that this exact token has not already
-   been spent. A token is marked used only once verification fully
-   succeeds, so a failed attempt never burns a still-valid token.
-4. **Idempotency guard**: even with two independently valid,
-   correctly-approved tokens for the same `user_id` within 10
-   seconds, only the first actually calls `process_upgrade()`; the
-   second returns the first call's cached result annotated with a
-   `_note` field, since `process_upgrade()` has no tier check of its
-   own and would silently double-deduct otherwise.
+| Condition | Result |
+|---|---|
+| Unknown requirement id | `error`: `Unknown requirement 'REQ-9.9'.` |
+| Model unavailable (quota, network, key) | `error`: `Model unavailable, no tests proposed: ...` |
+| Model refuses (`NO_GROUNDED_TESTS_FOUND`) | `error` carrying the refusal text |
+| Reply has no python code block | `error` |
+| Code fails the sandbox policy (below) | `error`: `Generated tests rejected by sandbox policy: ...` |
 
-Failure Behaviour
-------------------
-Maps directly to SubscriptionManager.process_upgrade()'s existing
-exceptions plus the layers above, so tool failures stay consistent
-with what Week 2's test cases already established:
-- Arguments fail schema validation (missing `user_id`, wrong type, or
-  an unexpected extra field): return `{"status": "error", "error":
-  "Arguments failed schema validation: ..."}`.
-- Caller not authorized for this `user_id`: return `{"status":
-  "error", "error": "Not authorized: <reason>"}`, before any approval
-  or token check even runs.
-- `approval_token` missing, malformed, tampered/forged signature,
-  issued for a different tool, bound to different arguments, expired,
-  or already used (replayed): return `{"status": "approval_required",
-  "error": "<specific reason>"}` — a distinct, recoverable status
-  from a generic error, so the agent can tell "blocked pending
-  approval" apart from "genuinely failed."
-- User not active (InactiveUserError): return
-  `{"status": "error", "error": "User account is not active."}`.
-- Insufficient balance (InsufficientFundsError): return
-  `{"status": "error", "error": "User balance is below the required threshold."}`.
-- User not found / API non-200 (UserNotFoundError): return
-  `{"status": "error", "error": "User not found."}`.
-- Ledger write failure (disk/permission error): return
-  `{"status": "error", "error": "Could not write upgrade to ledger, action not completed."}`.
-  The tool must not report success unless the ledger write actually
-  succeeded, since a reported success with no ledger record would be
-  a silent data integrity failure.
-- A duplicate, independently-approved upgrade within the 10-second
-  idempotency window: return the first call's cached `"success"`
-  result with an added `_note` explaining the suppression, rather
-  than deducting the balance a second time.
+---
 
-============================================================
-Tool 3: cancel_subscription
-============================================================
+## 3. `run_tests` — low impact (sandboxed)
 
-Purpose
--------
-Cancels a user's subscription: sets their tier to FREE. Issues no
-refund (see Tool 5: process_refund for that, which is a separate,
-explicitly-requested action).
+**Purpose:** run one test file and report pass/fail with failure messages.
 
-Wraps: SubscriptionManager.cancel_subscription()
-(docs/requirements/cancellation.md, Section 2.2)
-
-Risk level: Higher impact. Changes account state and is
-customer-facing (loses paid access), though it moves no money.
-
-Input Schema
-------------
+**Input schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "user_id": { "type": "string", "description": "The unique identifier of the user to cancel." },
-    "approval_token": { "type": "string", "description": "Signed, single-use token proving human approval of this exact cancellation. The model cannot generate this." }
-  },
-  "required": ["user_id"]
-}
+{"type": "object",
+ "properties": {"requirement_id": {"type": "string"}, "test_file": {"type": "string"}},
+ "required": ["requirement_id", "test_file"]}
 ```
 
-Output Schema
--------------
+**Output schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "status": { "type": "string", "enum": ["success", "error", "approval_required"] },
-    "user_id": { "type": "string" },
-    "new_tier": { "type": "string" },
-    "error": { "type": ["string", "null"] }
-  },
-  "required": ["status"]
-}
+{"status": "success | error", "requirement_id": "REQ-2.1",
+ "test_outcome": "passed | failed | no_tests",
+ "passed": 6, "failed": 1, "errors": 0,
+ "failures": [{"test_name": "test_x::test_upgrade_exact_boundary_balance", "message": "<= 4000 chars>"}]}
 ```
 
-Authorization
--------------
-Same four-layer treatment as upgrade_user_subscription (authorization
-before approval, signed single-use token, idempotency guard). Included
-in IDEMPOTENCY_GUARDED_TOOLS because the underlying method checks tier
-against the freshly-fetched external API response, not the local
-ledger — a second, independently-approved call could otherwise repeat
-the write. `self` may cancel only their own account; `support` may
-cancel any single named account.
+**Failure behaviour**
 
-Failure Behaviour
-------------------
-- Schema/authorization/approval-token failures: identical shape to
-  upgrade_user_subscription (see Tool 2).
-- User not active (InactiveUserError): `{"status": "error", "error":
-  "User account is not active."}`.
-- Already on FREE tier (AlreadyCancelledError): `{"status": "error",
-  "error": "User is already on the FREE tier."}`.
-- User not found / API non-200 (UserNotFoundError): `{"status":
-  "error", "error": "User not found."}`.
-- Ledger write failure: `{"status": "error", "error": "Could not
-  write cancellation to ledger, action not completed."}`.
+| Condition | Result |
+|---|---|
+| Path outside the allowed folders (e.g. `../../src/tool_calling.py`) | `error`: `... is outside the sandbox's allowed test folders.` |
+| File does not exist | `error`: `Test file '...' does not exist.` |
+| Generated file fails the policy re-check | `error`: `Test file rejected by sandbox policy: ...` |
+| Run exceeds the timeout | `error`: `Test run exceeded the 60s sandbox timeout and was stopped.` |
+| pytest produced no report | `error` with truncated output |
 
-============================================================
-Tool 4: downgrade_subscription
-============================================================
+---
 
-Purpose
--------
-Downgrades a user from PREMIUM to STANDARD and credits $20.00 back to
-their ledger balance. Downgrade from STANDARD to FREE is out of scope
-(that's cancellation).
+## 4. `draft_issue` — low impact (simulated side effect)
 
-Wraps: SubscriptionManager.downgrade_subscription()
-(docs/requirements/downgrade.md, Section 2.3)
+**Purpose:** write a reviewable issue draft. Nothing leaves the repository.
 
-Risk level: Higher impact. Moves balance and changes tier.
-
-Input Schema
-------------
+**Input schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "user_id": { "type": "string", "description": "The unique identifier of the user to downgrade." },
-    "approval_token": { "type": "string", "description": "Signed, single-use token proving human approval of this exact downgrade. The model cannot generate this." }
-  },
-  "required": ["user_id"]
-}
+{"type": "object",
+ "properties": {
+   "requirement_id": {"type": "string"},
+   "title": {"type": "string"},
+   "summary": {"type": "string"},
+   "failing_tests": {"type": "array", "items": {"type": "string"}}},
+ "required": ["requirement_id", "title", "summary", "failing_tests"]}
 ```
 
-Output Schema
--------------
+**Output schema:** `{"status": "success | error", "draft_path": "evidence/issues/drafts/ISSUE-REQ-2.1-<UTC stamp>.md"}`
+
+The draft quotes the requirement text, lists the failing tests, includes the summary, and ends
+with `Drafted by Inspectra QA agent - not filed.` An unknown requirement id returns `error`.
+
+---
+
+## 5. `file_issue` — HIGH impact
+
+**Purpose:** file a drafted issue. In this commit it is filed locally to `evidence/issues/filed/`;
+the GitHub integration is added in the Week 6 realignment.
+
+**Input schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "status": { "type": "string", "enum": ["success", "error", "approval_required"] },
-    "user_id": { "type": "string" },
-    "new_tier": { "type": "string" },
-    "new_balance": { "type": "number" },
-    "error": { "type": ["string", "null"] }
-  },
-  "required": ["status"]
-}
+{"type": "object",
+ "properties": {"draft_path": {"type": "string"},
+                "approval_token": {"type": ["string", "null"], "default": null}},
+ "required": ["draft_path"]}
 ```
 
-Authorization
--------------
-Same four-layer treatment as upgrade_user_subscription, including the
-idempotency guard (a duplicate approved downgrade would otherwise
-double-credit $20.00, for the same reason cancel_subscription needs
-the guard — the tier check reads the freshly-fetched API response,
-not the local ledger). `self` may downgrade only their own account;
-`support` may downgrade any single named account.
+**Output schema:** `{"status": "success | error | approval_required", "filed_path": "...", "channel": "local"}`
 
-Failure Behaviour
-------------------
-- Schema/authorization/approval-token failures: identical shape to
-  upgrade_user_subscription.
-- Tier is not PREMIUM (InvalidTierTransitionError): `{"status":
-  "error", "error": "Only a PREMIUM subscription can be downgraded."}`.
-- User not active (InactiveUserError): `{"status": "error", "error":
-  "User account is not active."}`.
-- User not found / API non-200 (UserNotFoundError): `{"status":
-  "error", "error": "User not found."}`.
-- Ledger write failure: `{"status": "error", "error": "Could not
-  write downgrade to ledger, action not completed."}`.
+**Authorization:** `_run_one_tool` asks the human (`request_human_approval`) and, only on approval,
+mints an HMAC-SHA256 token bound to `file_issue` and `{"draft_path": ...}` (single use, 120 s).
+The tool verifies the token itself with `verify_and_consume_token`, so calling it directly without
+a token is refused.
 
-============================================================
-Tool 5: process_refund
-============================================================
+| Condition | Result |
+|---|---|
+| No / tampered / expired / replayed token | `approval_required`, nothing filed |
+| Human rejects | `approval_required` (`Action rejected by human operator.`) |
+| `draft_path` not an existing file in `evidence/issues/drafts/` | `error` |
+| Copy fails | `error`: `Could not file the issue, action not completed.` |
 
-Purpose
--------
-Refunds a user's most recent tier upgrade if it completed within the
-last 7 days: reverts their tier to what it was before the upgrade and
-credits $50.00 back to their balance.
+---
 
-Wraps: SubscriptionManager.process_refund()
-(docs/requirements/refund.md, Section 2.4)
+## 6. `save_test_to_suite` — HIGH impact
 
-Risk level: Higher impact. Financial, and reads/writes local
-transaction history (not just the external API).
+**Purpose:** keep a useful generated test by copying it into `sut/tests/`. This changes the
+repository, so it needs approval (Week 1 boundary matrix).
 
-Input Schema
-------------
+**Input schema**
 ```json
-{
-  "type": "object",
-  "properties": {
-    "user_id": { "type": "string", "description": "The unique identifier of the user to refund." },
-    "approval_token": { "type": "string", "description": "Signed, single-use token proving human approval of this exact refund. The model cannot generate this." }
-  },
-  "required": ["user_id"]
-}
+{"type": "object",
+ "properties": {"test_file": {"type": "string"},
+                "approval_token": {"type": ["string", "null"], "default": null}},
+ "required": ["test_file"]}
 ```
 
-Output Schema
--------------
-```json
-{
-  "type": "object",
-  "properties": {
-    "status": { "type": "string", "enum": ["success", "error", "approval_required"] },
-    "user_id": { "type": "string" },
-    "new_tier": { "type": "string" },
-    "new_balance": { "type": "number" },
-    "error": { "type": ["string", "null"] }
-  },
-  "required": ["status"]
-}
-```
+**Output schema:** `{"status": "success | error | approval_required", "saved_path": "sut/tests/<name>.py"}`
 
-Authorization
--------------
-Authorization + signed approval token, same as the other
-state-changing tools. **Not** in IDEMPOTENCY_GUARDED_TOOLS: unlike
-upgrade/cancel/downgrade, SubscriptionManager.process_refund() checks
-its own precondition (the `refunded` flag) against the LOCAL ledger on
-every single call, so a second attempt deterministically raises
-AlreadyRefundedError on its own — a second, redundant guard here would
-just be two mechanisms protecting the same invariant. `self` may
-refund only their own account; `support` may refund any single named
-account.
+**Authorization and failures:** same token flow as `file_issue`, bound to `{"test_file": ...}`.
+A `test_file` outside `sandbox/generated/` (for example a file in `src/`) is refused with `error`.
 
-Failure Behaviour
-------------------
-- Schema/authorization/approval-token failures: identical shape to
-  upgrade_user_subscription.
-- No eligible upgrade on record, or it's older than 7 days
-  (RefundNotEligibleError): `{"status": "error", "error": "<specific
-  reason>"}`.
-- Already refunded (AlreadyRefundedError): `{"status": "error",
-  "error": "This upgrade has already been refunded."}`.
-- User not found / API non-200 (UserNotFoundError): `{"status":
-  "error", "error": "User not found."}`.
-- Ledger write failure: `{"status": "error", "error": "Could not
-  write refund to ledger, action not completed."}`.
+---
 
-============================================================
-Tool 6: start_trial
-============================================================
+## Sandbox rules (`src/sandbox.py`)
 
-Purpose
--------
-Starts a one-time, 14-day free PREMIUM trial for a user whose account
-is less than 14 days old and who has not already used a trial. No
-balance is deducted.
+| Rule | Value |
+|---|---|
+| Allowed test folders | `sandbox/generated/`, `sut/tests/` (paths are resolved first, so `../` cannot escape) |
+| Process | `subprocess.run([python, "-m", "pytest", file, "-q", "-p", "no:cacheprovider", "--junitxml", tmp])` with `shell=False`, `cwd` = project root |
+| Timeout | 60 s (`TEST_TIMEOUT_SECONDS`); the process is killed on timeout |
+| Environment | Only `PATH`, `SYSTEMROOT`, `TEMP`, `TMP`, plus `PYTHONPATH=sut/`. `GEMINI_API_KEY`, `GITHUB_TOKEN` and every other variable are dropped |
+| Output | Parsed from the JUnit XML report; each failure message truncated to 4000 chars |
+| Generated-code imports allowed | `pytest`, `unittest`, `unittest.mock`, `json`, `os`, `tempfile`, `pathlib`, `requests`, `subscription_service` |
+| Generated-code rejected | `eval`, `exec`, `compile`, `__import__`, `os.system`, `os.popen`, `os.remove`, `os.unlink`, `os.rmdir`, `os.exec*`, `os.spawn*`; imports of `subprocess`, `socket`, `shutil`, `ctypes`, `urllib`, `http`; relative imports; code that does not parse |
+| When the policy is checked | When `propose_tests` writes the file, and again when `run_tests` runs a generated file |
 
-Wraps: SubscriptionManager.start_trial()
-(docs/requirements/trial_period.md, Section 2.5)
-
-Risk level: Higher impact. No money moves, but it grants free access
-to a paid tier — the assignment's "higher-impact action" bar isn't
-limited to things that cost money, so this is gated the same as the
-financial tools.
-
-Input Schema
-------------
-```json
-{
-  "type": "object",
-  "properties": {
-    "user_id": { "type": "string", "description": "The unique identifier of the user to start a trial for." },
-    "approval_token": { "type": "string", "description": "Signed, single-use token proving human approval of starting this exact trial. The model cannot generate this." }
-  },
-  "required": ["user_id"]
-}
-```
-
-Output Schema
--------------
-```json
-{
-  "type": "object",
-  "properties": {
-    "status": { "type": "string", "enum": ["success", "error", "approval_required"] },
-    "user_id": { "type": "string" },
-    "new_tier": { "type": "string" },
-    "trial_start_date": { "type": "string" },
-    "trial_end_date": { "type": "string" },
-    "error": { "type": ["string", "null"] }
-  },
-  "required": ["status"]
-}
-```
-
-Authorization
--------------
-Authorization + signed approval token, same as the other
-state-changing tools. **Not** in IDEMPOTENCY_GUARDED_TOOLS, for the
-same reason as process_refund: `trial_start_date` is checked against
-the LOCAL ledger on every call, so a repeat call deterministically
-raises TrialAlreadyUsedError on its own. `self` may start a trial only
-for their own account; `support` may act on any single named account.
-
-Failure Behaviour
-------------------
-- Schema/authorization/approval-token failures: identical shape to
-  upgrade_user_subscription.
-- Trial already used (TrialAlreadyUsedError): `{"status": "error",
-  "error": "This user has already used their trial."}`.
-- Account 14 days or older (TrialNotEligibleError): `{"status":
-  "error", "error": "<specific reason>"}`.
-- User not found / API non-200 (UserNotFoundError): `{"status":
-  "error", "error": "User not found."}`.
-- Ledger write failure: `{"status": "error", "error": "Could not
-  write trial start to ledger, action not completed."}`.
-
-============================================================
-Notes
-============================================================
-- All four state-changing tools added in this revision
-  (cancel_subscription, downgrade_subscription, process_refund,
-  start_trial) reuse the exact same hardening pipeline as
-  upgrade_user_subscription: schema validation, pre-approval
-  authorization, signed single-use approval tokens, and (for
-  upgrade/cancel/downgrade specifically) an idempotency guard. No new
-  safety mechanism was invented per tool — the goal was one hardening
-  design applied uniformly, not six bespoke ones.
-- Per the assignment's safety boundary, no tool may be triggered by
-  anything other than an explicit request tied to a specific
-  user_id; no bulk or unattended execution across multiple users is
-  in scope for any of the six tools.
-- A downgrade from STANDARD to FREE remains out of scope for
-  downgrade_subscription (per downgrade.md); use cancel_subscription
-  for that case instead.
-- What happens automatically when a trial period ends (auto-downgrade
-  vs. auto-charge vs. left on PREMIUM) is explicitly out of scope per
-  trial_period.md and is not implemented by start_trial or anywhere
-  else in this codebase.
+**Known limits.** This is a process-level sandbox, not an OS container. A generated test can
+still use CPU until the timeout, and could open files with `open()`. The import allow-list,
+the secret-free environment and the timeout are the controls we rely on; a container is
+future work.

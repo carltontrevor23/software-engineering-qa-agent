@@ -1,6 +1,9 @@
 """
 src/capture_week5_traces.py
 
+SUPERSEDED (Week 4 realignment): this script drives the removed subscription tools
+and no longer runs. It is rewritten for the QA agent in the Week 5 realignment.
+
 Week 5 Activity 5: Capture live execution traces for the Bounded User Subscription Agent.
 Executes multi-step decision workflows against the real Gemini model (gemini-3.6-flash)
 via LangGraph, logging node-by-node state transitions, tool calls, observations,

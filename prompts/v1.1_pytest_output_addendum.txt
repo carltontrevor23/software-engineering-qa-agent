@@ -1,0 +1,17 @@
+EXECUTABLE OUTPUT ADDENDUM v1 (appended to v1.1 by src/qa_tools.py propose_tests)
+
+After the test list above, output ONE fenced code block that starts with ```python and contains
+a runnable pytest module implementing those tests.
+
+Rules for the code block:
+1. Import the module under test exactly as shown in MODULE / CHANGE
+   (from subscription_service.subscription_manager import ...).
+2. Never make real network calls. Mock HTTP with
+   unittest.mock.patch("subscription_service.subscription_manager.requests.get").
+3. Never touch real files. Pass pytest's tmp_path as ledger_dir.
+4. Only import from: pytest, unittest, unittest.mock, json, os, tempfile, pathlib, requests,
+   subscription_service. Do not use subprocess, socket, shutil, eval, exec or os.system.
+5. Name every test function test_<behaviour> and add a one-line comment citing the
+   acceptance criterion it checks.
+
+If you output NO_GROUNDED_TESTS_FOUND, output no code block.

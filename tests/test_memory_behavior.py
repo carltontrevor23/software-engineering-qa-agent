@@ -14,7 +14,10 @@ Validates:
 import os
 import json
 import pytest
-from src.memory import record_case, get_case_history, MEMORY_FILE
+# Use the memory module tests/conftest.py isolates (the one tool_calling imports),
+# so these tests never touch the real data/memory file.
+import memory
+from memory import record_case, get_case_history
 from src.approval import (
     is_high_impact,
     request_human_approval,
@@ -31,13 +34,13 @@ def clean_memory_and_tokens():
     """Ensure clean memory file and nonces between test runs."""
     _CONSUMED_NONCES.clear()
     set_approval_hook(None)
-    if os.path.exists(MEMORY_FILE):
-        os.remove(MEMORY_FILE)
+    if os.path.exists(memory.MEMORY_FILE):
+        os.remove(memory.MEMORY_FILE)
     yield
     _CONSUMED_NONCES.clear()
     set_approval_hook(None)
-    if os.path.exists(MEMORY_FILE):
-        os.remove(MEMORY_FILE)
+    if os.path.exists(memory.MEMORY_FILE):
+        os.remove(memory.MEMORY_FILE)
 
 
 # =====================================================================
@@ -46,32 +49,32 @@ def clean_memory_and_tokens():
 
 def test_memory_surfaces_legitimate_audit_history():
     """Verify memory accurately captures and orders historical activity."""
-    user = "u123"
-    record_case(user, "get_user_subscription_status", "success", hops=1)
-    record_case(user, "upgrade_user_subscription", "failed_insufficient_funds", hops=2)
-    record_case(user, "upgrade_user_subscription", "success", hops=3)
+    req = "REQ-2.1"
+    record_case(req, "search_requirements", "success", hops=1)
+    record_case(req, "run_tests", "success", hops=2)
+    record_case(req, "file_issue", "success", hops=3)
 
-    history = get_case_history(user, limit=3)
+    history = get_case_history(req, limit=3)
     assert len(history) == 3
     # Most recent first
     assert history[0]["status"] == "success"
     assert history[0]["hops"] == 3
-    assert history[1]["status"] == "failed_insufficient_funds"
-    assert history[2]["tool_name"] == "get_user_subscription_status"
+    assert history[1]["tool_name"] == "run_tests"
+    assert history[2]["tool_name"] == "search_requirements"
 
 
 def test_memory_tenant_isolation():
-    """Verify history for user_A is never leaked to user_B."""
-    record_case("user_A", "upgrade_user_subscription", "success", hops=1)
-    record_case("user_B", "get_user_subscription_status", "success", hops=1)
+    """Verify history for one requirement is never mixed into another's."""
+    record_case("REQ-2.1", "file_issue", "success", hops=1)
+    record_case("REQ-2.4", "search_requirements", "success", hops=1)
 
-    hist_a = get_case_history("user_A")
-    hist_b = get_case_history("user_B")
+    hist_a = get_case_history("REQ-2.1")
+    hist_b = get_case_history("REQ-2.4")
 
     assert len(hist_a) == 1
-    assert hist_a[0]["user_id"] == "user_A"
+    assert hist_a[0]["user_id"] == "REQ-2.1"
     assert len(hist_b) == 1
-    assert hist_b[0]["user_id"] == "user_B"
+    assert hist_b[0]["user_id"] == "REQ-2.4"
 
 
 # =====================================================================
@@ -81,15 +84,14 @@ def test_memory_tenant_isolation():
 def test_memory_never_silently_bypasses_human_approval():
     """
     SAFETY TEST:
-    Even if persistent memory contains prior approved upgrades for this user,
-    a new upgrade action must still be intercepted by the human gate.
+    Even if persistent memory contains prior filed issues for this requirement,
+    a new file_issue action must still be intercepted by the human gate.
     """
-    user = "u123"
-    # Pre-seed persistent memory with a successful prior upgrade
-    record_case(user, "upgrade_user_subscription", "success", hops=2)
+    # Pre-seed persistent memory with a successful prior filing
+    record_case("REQ-2.1", "file_issue", "success", hops=2)
 
-    tool_name = "upgrade_user_subscription"
-    args = {"user_id": user}
+    tool_name = "file_issue"
+    args = {"draft_path": "evidence/issues/drafts/ISSUE-REQ-2.1-20261011T120000Z.md"}
 
     # Verify policy still flags it as high impact regardless of memory
     assert is_high_impact(tool_name) is True
