@@ -29,14 +29,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 # 1. Policy: Higher-Impact Actions
 # =====================================================================
 
-# Tools that modify financial balances, change user subscription tiers,
-# or perform persistent file writes to the ledger.
+# Tools whose effects leave the sandbox: filing an issue, or changing the
+# repository's test suite (Week 1 rule: repo changes need human approval).
 HIGH_IMPACT_TOOLS = {
-    "upgrade_user_subscription",
-    "cancel_subscription",
-    "downgrade_subscription",
-    "process_refund",
-    "start_trial",
+    "file_issue",
+    "save_test_to_suite",
 }
 
 
@@ -217,7 +214,7 @@ def request_human_approval(
         print("=" * 65)
         print(f" Tool:      {tool_name}")
         print(f" Arguments: {json.dumps(clean_args, indent=2)}")
-        print(" Warning:   This action modifies account state and persistent ledgers.")
+        print(" Warning:   This action files an issue or changes the repository's test suite.")
         print("-" * 65)
         try:
             choice = input(" Authorize this action? [y/N]: ").strip().lower()

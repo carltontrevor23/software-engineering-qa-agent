@@ -1,99 +1,107 @@
-# State Model — Week 6, Task 1
+# State Model — Week 6 (realigned)
 
-Project: Software-Engineering QA Agent (Inspectra)
-Grounded in: src/tool_calling.py (AgentState), src/memory.py
+**Project:** Software-Engineering QA Agent (Inspectra)
+**Code:** `AgentState` and `initial_state()` in [`src/tool_calling.py`](../../src/tool_calling.py); the phase
+machine in [`src/workflow.py`](../../src/workflow.py); persistent memory in [`src/memory.py`](../../src/memory.py)
+**Tests:** [`tests/test_agent_contract.py`](../../tests/test_agent_contract.py), [`tests/test_mcp_server.py`](../../tests/test_mcp_server.py)
 
-This document makes explicit what was previously only implicit in
-code: the shape of session state, its lifecycle, and who is allowed
-to read or write each field. It also draws the line between session
-state (this document) and persistent memory (src/memory.py, covered
-separately under Week 6's memory activities), since the two are
-easy to conflate but behave very differently.
+This replaces the earlier state model of the subscription-upgrade agent (`messages` + `hops` only).
+The old version is in git history.
 
-============================================================
-1. What counts as one session
-============================================================
-One session is one call to `run(prompt)`, corresponding to the
-agent's bounded goal: resolve one user's upgrade request to either a
-human-approved success or an explained refusal (see AGENT_CONTRACT
-in tool_calling.py). A session begins when `graph.invoke(...)` is
-called and ends when `run()` returns a final answer or the
-`STOPPED_MESSAGE` (hop budget exhausted).
+## 1. Session state vs persistent memory
 
-============================================================
-2. The state object
-============================================================
-```python
-class AgentState(MessagesState):
-    hops: int
+| | Session state (`AgentState`) | Persistent memory (`memory.py`) |
+|---|---|---|
+| Where | RAM, inside one LangGraph run | Disk: `data/memory/case_history.jsonl` (git-ignored) |
+| Lifetime | One `run(prompt)` / one `demo/run_demo.py` run | Across runs, purged after 30 days |
+| Contents | Messages, hop count, workflow fields | Metadata of executed tool calls per requirement |
+| Who reads it | The model (messages only) and the deterministic guard | The human approver only, printed at the approval prompt |
+| Sent to the LLM? | `messages` only | **Never** |
+
+Nothing from memory is copied into `AgentState`, and `AgentState` has no field for it
+(`test_memory_not_in_llm_state`).
+
+## 2. Fields
+
+| Field | Type | Written by | When | Read by |
+|---|---|---|---|---|
+| `messages` | list of messages | `assistant()` appends the model reply; `execute_tools()` appends one `ToolMessage` per call | Every step | `assistant()` (sent to the model); `run()` |
+| `hops` | int | `execute_tools()` | +1 per tool step | `route_after_tools()` (stops at `MAX_HOPS = 7`) |
+| `requirement_id` | str or None | `execute_tools()` via `workflow.apply_result` | After a successful `search_requirements` (top hit) or `propose_tests` | Case-history key; the approval display |
+| `phase` | str | `execute_tools()`; `assistant()` on the final answer | After every executed tool; at the end | `workflow.check_call()` (phase guard) |
+| `test_file` | str or None | `execute_tools()` | After `propose_tests` succeeds | Pins `run_tests` / `save_test_to_suite` to this file |
+| `test_outcome` | str or None | `execute_tools()` | After `run_tests` (`passed` / `failed` / `no_tests`) | Phase transition; final report |
+| `draft_path` | str or None | `execute_tools()` | After `draft_issue` succeeds | Pins `file_issue` to this draft |
+| `stop_reason` | str or None | `execute_tools()`, or `assistant()` on the final answer | When the run reaches a stop condition | `run()` and `demo/run_demo.py` print it |
+| `proposals_made` | int | `execute_tools()` | +1 per successful `propose_tests` | Allows exactly one regenerate after a failed run |
+
+All workflow fields are set **from tool results, never from the model's text**. The model can
+only ask for a tool; `workflow.apply_result()` decides what the result means for the state.
+`proposals_made` is one field beyond the brief's list; it is needed to enforce "one regenerate".
+
+## 3. Phases and allowed tools
+
+```mermaid
+stateDiagram-v2
+    [*] --> START
+    START --> REQUIREMENT_RESOLVED: search_requirements finds a requirement
+    START --> TESTS_PROPOSED: propose_tests (user gave REQ-X.Y)
+    START --> STOPPED: search finds nothing / unknown id
+    REQUIREMENT_RESOLVED --> REQUIREMENT_RESOLVED: search_requirements (re-plan)
+    REQUIREMENT_RESOLVED --> TESTS_PROPOSED: propose_tests
+    TESTS_PROPOSED --> TESTS_RUN_PASSED: run_tests passed
+    TESTS_PROPOSED --> TESTS_RUN_FAILED: run_tests failed / no_tests
+    TESTS_RUN_FAILED --> TESTS_PROPOSED: propose_tests (one regenerate)
+    TESTS_RUN_FAILED --> ISSUE_DRAFTED: draft_issue (code defect)
+    TESTS_RUN_FAILED --> DONE: final answer (test defect)
+    TESTS_RUN_PASSED --> DONE: final answer / save_test_to_suite approved
+    ISSUE_DRAFTED --> DONE: file_issue approved and filed
+    ISSUE_DRAFTED --> STOPPED: human rejects
+    TESTS_RUN_PASSED --> STOPPED: human rejects save_test_to_suite
+    note right of STOPPED: any tool error, or hops >= MAX_HOPS
+    DONE --> [*]
+    STOPPED --> [*]
 ```
 
-This extends LangGraph's built-in `MessagesState`, which itself
-supplies one field:
+`ALLOWED_TOOLS_BY_PHASE` (in `workflow.py`):
 
-| Field      | Type              | Written by                          | Read by                                   |
-|------------|-------------------|--------------------------------------|--------------------------------------------|
-| `messages` | list of Human/AI/ToolMessage | `assistant()` appends the model's response; `execute_tools()` appends one ToolMessage per executed tool call | `assistant()` reads the full list to build the next LLM call; `run()` reads it to extract the final text reply |
-| `hops`     | int               | `execute_tools()` only, incremented exactly once per step | `route_after_tools()` only, to decide whether to loop back to `assistant` or stop |
+| Phase | Allowed tools |
+|---|---|
+| `START` | `search_requirements`, `propose_tests` |
+| `REQUIREMENT_RESOLVED` | `propose_tests`, `search_requirements` |
+| `TESTS_PROPOSED` | `run_tests` |
+| `TESTS_RUN_PASSED` | `save_test_to_suite` |
+| `TESTS_RUN_FAILED` | `draft_issue`, `propose_tests` (one regenerate only) |
+| `ISSUE_DRAFTED` | `file_issue` |
+| `DONE`, `STOPPED` | none |
 
-Two things are deliberately NOT part of this state object, worth
-calling out since their absence is a design decision, not an
-oversight:
-- **The system prompt.** `assistant()` builds
-  `[SystemMessage(content=SYSTEM_PROMPT)] + state["messages"]` fresh
-  on every call. It is injected at read time, not stored in state,
-  so it cannot drift or be overwritten mid-session.
-- **Case history from memory.py.** `get_case_history()` is called
-  directly inside `_run_one_tool()` and printed for the human
-  approver. It is never written into `state["messages"]`, so it
-  never reaches the LLM and never becomes part of this session's
-  state. This is enforced, not just intended:
-  `test_case_history_never_reaches_llm_or_token` asserts it directly.
+A call that is not allowed returns an error `ToolMessage` such as
+`Tool file_issue is not allowed in phase TESTS_RUN_FAILED.` and **is not executed**. No approval is
+asked for, nothing is written, and nothing is recorded in memory.
 
-============================================================
-3. Lifecycle
-============================================================
-- **Created**: fresh at the start of `run()`, with
-  `{"messages": [HumanMessage(content=prompt)], "hops": 0}`. Nothing
-  is loaded from a prior session; state does not persist across
-  separate `run()` calls.
-- **Mutated**: each graph node returns a partial update that
-  LangGraph merges into state. `assistant()` adds one AIMessage per
-  call. `execute_tools()` adds one ToolMessage per executed tool
-  call and increments `hops` by exactly 1, regardless of how many
-  tool calls were requested in that step (`MAX_CALLS_PER_STEP = 1`
-  enforces only one actually executes; extras get a "skipped" error
-  message instead of being silently dropped).
-- **Destroyed**: when `run()` returns, the state object is not
-  written to disk anywhere. It exists only for the duration of one
-  `graph.invoke()` call, in memory, in the Python process running
-  the script.
+**File pinning.** `run_tests` and `save_test_to_suite` may only use `test_file` from state, and
+`file_issue` may only use `draft_path` from state. A model, or an instruction injected into a
+requirement or test output, cannot point them at another file
+(`test_file_issue_pinned_to_drafted_file`).
 
-============================================================
-4. Session state vs. persistent memory
-============================================================
-These are two different things and this project already implements
-both, worth being explicit about the boundary between them since
-Week 6 asks for both a state model and a separate memory note:
+## 4. Stop reasons
 
-| | Session state (this document) | Persistent memory (src/memory.py) |
+| `stop_reason` | Set when | Final phase |
 |---|---|---|
-| Scope | One `run()` call | One `user_id`, across all sessions |
-| Storage | In-memory only, never written to disk | Appended to `data/memory/case_history.jsonl` |
-| Lifetime | Destroyed when `run()` returns | Persists indefinitely across runs |
-| Who can read it | The LLM (via `messages`), the routing logic (via `hops`) | Only the human approver, printed at the point of a high-impact tool call; never sent to the LLM or bound into an approval token |
-| Influence on decisions | Directly: `hops` gates the stop condition, `messages` is what the LLM reasons over | Advisory only: informs a human before they approve or reject; does not alter what the LLM is told or automatically change the outcome |
+| `all_tests_passed` | `run_tests` passed | `DONE` |
+| `issue_filed` | `file_issue` succeeded after approval | `DONE` |
+| `human_rejection` | Human rejected `file_issue` / `save_test_to_suite` | `STOPPED` |
+| `tool_error` | A tool returned `status: error` | `STOPPED` |
+| `requirement_not_found` | No search hit, or unknown requirement id | `STOPPED` |
+| `hop_budget_exhausted` | `hops >= MAX_HOPS` before a terminal phase | `STOPPED` |
+| `test_defect_reported` | The model stopped in `TESTS_RUN_FAILED` without drafting (it judged the test wrong) | `DONE` |
 
-============================================================
-5. Bounds enforced through state
-============================================================
-Two hard limits are enforced purely through fields in this state
-object, not through external configuration:
-- `MAX_HOPS = 4`: `route_after_tools()` returns `END` once
-  `state["hops"] >= MAX_HOPS`, regardless of whether the task
-  actually finished. This is the session's iteration cap.
-- `MAX_CALLS_PER_STEP = 1`: enforced inside `execute_tools()` by
-  index-checking `last_message.tool_calls`, not by a state field,
-  but it directly shapes how `hops` increments (one step, one
-  executed call, one hop, no matter how many calls the model
-  requested).
+## 5. Lifecycle
+
+- **Created:** `initial_state(prompt)` sets `messages = [request]`, `hops = 0`, `phase = START`, the
+  other fields to `None` and `proposals_made = 0`. Nothing is loaded from earlier runs.
+- **Updated:** `execute_tools()` returns the changed fields after each step, and `assistant()`
+  closes the run when the model gives its final answer.
+- **Discarded:** when the run ends. Only the per-call metadata in `memory.py` outlives it.
+- **MCP server:** keeps the same workflow fields per server session (`start_check` resets them), so
+  MCP clients get the same phase guard and file pinning.

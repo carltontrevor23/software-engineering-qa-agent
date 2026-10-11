@@ -48,3 +48,5 @@ urllib3==2.6.3
 websockets==16.1.1
 zstandard==0.25.0
 mcp==1.30.0
+# Testing
+pytest==9.1.1

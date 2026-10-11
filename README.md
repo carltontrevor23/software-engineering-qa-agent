@@ -1,108 +1,125 @@
-# software-engineering-qa-agent
+# software-engineering-qa-agent (Inspectra)
 
-An AI-native Software-Engineering QA Agent for the BSE4104 capstone project.
-It reads a team's own requirements/repository documentation, proposes unit
-and integration tests, and (in later weeks) will execute approved tests in
-a sandbox and draft issue/PR notes for human review.
+An AI-native **software-engineering QA agent** for the BSE4104 capstone. For one requirement of a
+system under test, Inspectra:
+1. finds the requirement (BM25 retrieval over `docs/requirements/`);
+2. asks the model to propose pytest tests;
+3. runs them in a sandbox;
+4. if the code contradicts the requirement, drafts an issue, which **a human approves or rejects**
+   before it is filed (locally, or on GitHub).
 
-This is a Week 2 baseline: foundation model integration + prompt
-specification + evaluation. No RAG, tools, or agent loop yet.
+The system under test is a small subscription service in [`sut/`](sut/). The agent tests it; it
+never operates it. The agent cannot merge, deploy, read secrets, run arbitrary shell commands, or
+edit the SUT source.
 
 ## Setup
 
-1. **Clone the repo and enter it**
-   ```
-   cd software-engineering-qa-agent
-   ```
-
-2. **Create and activate a virtual environment**
+1. **Create and activate a virtual environment**
    ```
    python -m venv venv
    venv\Scripts\activate        # Windows
    source venv/bin/activate     # macOS / Linux
    ```
-
-3. **Install dependencies**
+2. **Install dependencies**
    ```
    pip install -r requirements.txt
    ```
-
-4. **Add your Gemini API key**
-
-   Copy `.env.example` to `.env` and fill in your own key:
+3. **Configure `.env`** (never commit it; it is git-ignored)
    ```
    cp .env.example .env
    ```
-   Then edit `.env`:
-   ```
-   GEMINI_API_KEY=your_key_here
-   ```
-   Get a free key at https://aistudio.google.com (click the key icon in
-   the sidebar → Create API key). **Never commit `.env`** — it's already
-   in `.gitignore`.
+   - `GEMINI_API_KEY`: required, also for the tests, because `src/model_client.py` checks it at
+     import. Get a free key at https://aistudio.google.com.
+   - `GITHUB_TOKEN`, `GITHUB_REPO`: optional. When both are set, approved issues are filed on
+     GitHub. Use a fine-grained token limited to *Issues: write* on a dedicated demo repository.
 
-## Running it
+The free Gemini tier allows about 20 requests per day per model; one live end-to-end run uses about
+5–8. Use `--offline` for rehearsals.
 
-### Quick connection + baseline test
-
-Runs a simple "say hello" check, then one real test-proposal prompt using
-`prompts/v1.0_test_proposal.txt`:
+## Running the tests
 
 ```
-python src/model_client.py
+venv\Scripts\python -m pytest tests/ sut/tests/ -v
 ```
 
-### Run the full 10-case evaluation
+The tests make no real model calls or GitHub calls. Memory, sandbox and issue folders are redirected
+to temp directories.
 
-Runs every case in `docs/evaluation/evaluation_cases.json` through the
-model using the v1.0 prompt, and saves expected vs. actual results:
+## Running the agent
+
+**CLI (live model):**
+```
+python src/tool_calling.py "Check REQ-2.1 against the code"
+```
+It prints the final answer and the stop reason. High-impact steps stop at an interactive
+`Authorize this action? [y/N]` prompt.
+
+**Demo runner:**
+```
+python demo/run_demo.py                          # REQ-2.1, correct SUT, live model
+python demo/run_demo.py --planted-bug            # boundary defect planted in a temp copy of sut/
+python demo/run_demo.py --planted-bug --offline  # no model calls: scripted LLM + fixture tests
+python demo/run_demo.py --requirement REQ-2.4    # another requirement
+```
+- `--planted-bug` changes `if balance < self.UPGRADE_COST:` to `<=` **in a temporary copy only**,
+  so the exact-$50.00 boundary test fails.
+- `--offline` labels every line `[SCRIPTED LLM]`.
+- The runner prints one line per hop (tool, status, test outcome, workflow phase) and the final
+  stop reason. At the approval prompt it shows the requirement's recent test runs and an
+  advisory (`FIRST FAILURE` / `RECURRING`).
+
+**Trace capture:** `python src/capture_week5_traces.py` writes the three Week 5 traces to
+`evidence/traces/week5_live_traces.jsonl` and `evidence/week5_live_execution_traces.md`.
+
+## Running the MCP server
 
 ```
-python src/model_client.py --run-evaluation
+python src/mcp_server.py          # terminal 1: listens on http://127.0.0.1:8000/mcp; approve/reject here
+python src/mcp_demo_client.py     # terminal 2: walks REQ-2.1 through the tools
 ```
+The server applies the same phase guard, sandbox and human approval as the agent, and refuses
+client-supplied approval tokens. See [`docs/architecture/mcp_interface_spec.md`](docs/architecture/mcp_interface_spec.md).
 
-Results are written to `evidence/traces/evaluation_results.json`. Every
-individual API call (success or failure) is also logged to
-`evidence/traces/trace_<date>.jsonl` for traceability.
-
-### Running against a different prompt version
-
-Once a new prompt spec (e.g. `v1.1_test_proposal.txt`) exists in `prompts/`:
+## Repository map
 
 ```
-python src/model_client.py --run-evaluation --template prompts/v1.1_test_proposal.txt --prompt-version v1.1 --output evidence/traces/evaluation_results_v1.1.json
-```
-
-## Project structure
-
-```
-docs/
-  architecture/       # architecture diagrams
-  evaluation/          # evaluation_cases.json + evaluation write-ups
-  requirements/        # requirements/documentation the agent reads
-  weekly-reports/       # weekly progress reports
-evidence/
-  demo/                # demo recordings/screens
-  screenshots/
-  traces/               # logged model calls + evaluation results
-knowledge/              # corpus metadata/provenance (no restricted data)
-prompts/                 # versioned Prompt Specification files
+sut/                          # SYSTEM UNDER TEST (the agent tests this, never edits it)
+  subscription_service/       #   subscription_manager.py
+  tests/                      #   human-written baseline tests (+ approved generated tests)
 src/
-  model_client.py        # model integration: connects to Gemini, runs prompts, logs calls
-tests/
+  tool_calling.py             # LangGraph agent: tools, AgentState, approval hand-off, CLI
+  workflow.py                 # phase machine: allowed tools per phase, file pinning, stop reasons
+  qa_tools.py                 # tool implementations (search, propose, run, draft, file, save)
+  sandbox.py                  # pytest runner: allow-listed paths, no shell, timeout, no secrets
+  approval.py                 # human approval gate + HMAC single-use tokens
+  memory.py                   # requirement test-run history (advisory for the approver)
+  rag.py                      # BM25 retrieval over docs/requirements
+  model_client.py             # Gemini client, prompt templates, call logging
+  demo_support.py             # scripted LLM, planted bug, tracing (demo, traces, tests)
+  mcp_server.py, mcp_demo_client.py
+  capture_week5_traces.py, run_rag_evaluation.py
+demo/                         # run_demo.py + fixtures/req_2_1_tests.py
+prompts/                      # versioned prompts (agent v2.0, test proposal v1.0/v1.1 + addendum)
+docs/
+  requirements/               # requirement corpus (REQ-2.1 ... REQ-2.6)
+  architecture/               # architecture, task contract, control loop, state model, memory, MCP
+  tools/tool_catalogue.md
+  evaluation/                 # evaluation cases and RAG questions
+  weekly-reports/
+  ai-engineering-log.md
+evidence/                     # test evidence, traces, issue drafts/filed, legacy/ (superseded)
+tests/                        # agent, tools, memory, MCP, RAG tests
+sandbox/generated/            # generated tests (git-ignored)
+data/                         # runtime memory (git-ignored)
 ```
 
 ## Model
 
-Gemini 3.6 Flash, via Google's Interactions API (`client.interactions.create`).
-See `docs/` for the full Model Selection Note.
+Gemini (`MODEL_NAME` in `.env`, default `gemini-3.8-flash`). It is called through LangChain for the
+agent loop and through the Google GenAI SDK for test proposals.
 
 ## Notes for the team
 
-- `src/model_client.py` is the shared integration layer — import
-  `get_model_response()` and `build_test_proposal_prompt()` rather than
-  duplicating API calls elsewhere.
-- Prompt specs live in `prompts/`, one file per version (`v1.0_*.txt`,
-  `v1.1_*.txt`, ...). Never edit an old version in place — version history
-  needs to show what changed and why.
-- Evaluation cases live in `docs/evaluation/evaluation_cases.json`.
+- Prompts live in `prompts/`, one file per version. Never edit an old version in place.
+- Record material AI-assisted changes in `docs/ai-engineering-log.md`.
+- Superseded subscription-agent evidence is kept in `evidence/legacy/`.

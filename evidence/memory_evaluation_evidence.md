@@ -1,122 +1,118 @@
-# Memory Evaluation Evidence: Task Improvement & Safety Verification
-**Project:** Software-Engineering QA Agent (Inspectra)  
-**Deliverable:** Week 6, Activity 4  
-**Date:** October 7, 2026  
+# Memory Evaluation Evidence: Requirement Test-Run History
 
----
+**Project:** Software-Engineering QA Agent (Inspectra)
+**Deliverable:** Week 6, working memory/state demonstration (realigned)
+**Generated:** 2026-10-11 from real runs of `demo/run_demo.py` and pytest
+**Design:** [`docs/architecture/memory_design_and_data_handling_note.md`](../docs/architecture/memory_design_and_data_handling_note.md)
 
-## 1. Objective and Justified Use Case
-Inspectra implements persistent case history (`src/memory.py`) to provide human operators with historical execution context prior to authorizing high-impact actions (such as tier upgrades and ledger mutations).
+The earlier version of this file covered the customer case history of the subscription-upgrade
+agent. It is in git history.
 
-This evaluation demonstrates two mandatory properties required by Week 6 Activity 4:
-1. **Legitimate Task Improvement:** Memory equips human operators with actionable operational context (recent user attempts, previous failures, and iteration counts) without polluting the LLM context window.
-2. **Absence of Silent Control:** Historical approval memory cannot bypass authorization gates, forge HMAC tokens, or autonomously trigger state mutations.
+## 1. What this shows
 
----
+1. **Memory improves a legitimate task.** At the approval prompt the human sees how earlier test
+   runs for the same requirement went, and gets an advisory telling a first failure apart from a
+   recurring one.
+2. **Memory does not silently control anything.** The human still answers `y/N`; the history never
+   reaches the LLM or the approval token.
 
-## 2. Comparative Evaluation Matrix
+## 2. Demo runs (offline mode, so no model quota was used)
 
-| Metric | Without Memory (Stateless) | With Persistent Memory (`src/memory.py`) |
-| :--- | :--- | :--- |
-| **Operator Context** | Human approver sees only the instantaneous tool name and arguments (`{"user_id": "u123"}`). | Operator sees instantaneous arguments plus the user's last 3 executions (timestamp, tool, outcome, and hops). |
-| **Abuse / Loop Detection** | Approver cannot detect if a user has attempted 5 failed upgrades in the last 2 minutes. | Approver immediately spots repeated failure patterns (e.g., repeated `failed_insufficient_funds`). |
-| **Token Consumption** | Baseline prompt tokens. | Exact same token count (memory is never injected into LLM `messages`). |
-| **Safety Boundary** | Intercepted at human approval gate. | Intercepted at human approval gate (prior approval in memory does not auto-authorize). |
+Three consecutive runs on REQ-2.1, starting from an empty history. Lines are as printed (the
+`[SCRIPTED LLM]` label marks offline mode).
 
----
+### Run 1: correct SUT → tests pass, nothing to approve
 
-## 3. Demonstration of Non-Silent Control
-
-### 3.1 The Vulnerability / Failure Mode (Silent Control)
-In flawed agentic designs, persistent memory frequently introduces "silent control" risks:
-* The agent inspects historical memory, notices that user `u123` was previously granted approval for an upgrade, and presumes future upgrades are pre-authorized.
-* The system silently skips the human authorization gate, generating a synthetic approval token or calling state-mutating tools autonomously.
-
-### 3.2 Inspectra's Architectural Defense
-Inspectra eliminates silent control through strict architectural separation:
-1. **Advisory Role Only:** Case history stored in `data/memory/case_history.jsonl` is read exclusively for console output to the human approver (`[CASE HISTORY] last N action(s)...`).
-2. **Unconditional Gate Policy:** `is_high_impact("upgrade_user_subscription")` evaluates tool risk statically based on tool classification, regardless of whether memory is empty or contains prior successes.
-3. **Cryptographic Token Binding:** Every state mutation requires an unconsumed, HMAC-SHA256 signed single-use token (`approval_token`). Tokens cannot be synthesized from past logs; they are generated only when the operator explicitly inputs `y/yes`.
-
-### 3.3 Walkthrough Scenario
-A user account (`u123`) was successfully upgraded in a prior session, which was logged in `case_history.jsonl`:
-
-```json
-{"timestamp": "2026-10-06T17:45:00Z", "user_id": "u123", "tool_name": "upgrade_user_subscription", "status": "success", "hops": 2}
+```text
+[SCRIPTED LLM] hop 0 | assistant     | call search_requirements(query=Check REQ-2.1 (Tier Upgrades) against the code.)  (0.01s)
+[SCRIPTED LLM] hop 1 | execute_tools | search_requirements -> status=success [phase REQUIREMENT_RESOLVED]  (0.01s)
+[SCRIPTED LLM] hop 1 | assistant     | call propose_tests(requirement_id=REQ-2.1)  (0.0s)
+[SCRIPTED LLM] hop 2 | execute_tools | propose_tests -> status=success [phase TESTS_PROPOSED]  (0.01s)
+[SCRIPTED LLM] hop 2 | assistant     | call run_tests(requirement_id=REQ-2.1, test_file=test_req_2_1_b9104a5b.py)  (0.0s)
+[SCRIPTED LLM] hop 3 | execute_tools | run_tests -> status=success test_outcome=passed [phase TESTS_RUN_PASSED]  (4.96s)
+[SCRIPTED LLM] hop 3 | assistant     | final answer [phase DONE]  (0.0s)
+[SCRIPTED LLM] Stop reason: all_tests_passed (final phase DONE)
 ```
 
-In a subsequent session, a new upgrade request is initiated for `u123`:
-1. **Sense:** Model inspects account status via `get_user_subscription_status("u123")`.
-2. **Plan:** Model plans `upgrade_user_subscription("u123")`.
-3. **Intercept & Surface:** `_run_one_tool` detects high-impact action, reads persistent memory, and surfaces context to the human:
-   ```text
-   [CASE HISTORY] last 1 action(s) for u123: upgrade_user_subscription -> success (2026-10-06T17:45:00Z)
-   [HUMAN APPROVAL REQUIRED] - HIGHER-IMPACT ACTION INTERCEPTED
-   Tool: upgrade_user_subscription
-   Arguments: {"user_id": "u123"}
-   Authorize this action? [y/N]:
-   ```
-4. **Gate Enforcement:**
-   * If the human rejects (`auto_decision=False`), `request_human_approval` returns `(False, None, "Action rejected by human operator.")`.
-   * The tool returns `{"status": "approval_required", "error": "Action rejected by human operator."}`.
-   * `verify_and_consume_token(None)` rejects execution with `"Approval token missing"`.
-   * **Result:** No mutation occurs, the ledger is untouched, and memory provides zero silent authorization leverage.
+### Run 2: planted defect → first failure → human approves
 
----
-
-## 4. Architectural Isolation & LLM Decoupling
-
-Inspectra maintains a strict firewall between persistent memory and LLM reasoning:
-
-```
-┌────────────────────────┐         ┌───────────────────────────────┐
-│     Persistent Disk    │         │          AgentState           │
-│ data/memory/case_hist  │         │  {"messages": [...], hops: N} │
-└───────────┬────────────┘         └───────────────┬───────────────┘
-            │ (Read by Orchestrator)               │
-            ▼                                      ▼
-┌────────────────────────┐         ┌───────────────────────────────┐
-│  Human Operator Console│         │     LLM Reasoning Context     │
-│ [CASE HISTORY] readout │         │ (Completely isolated from     │
-│  (Human context only)  │         │  case history logs)           │
-└────────────────────────┘         └───────────────────────────────┘
+```text
+[SCRIPTED LLM] hop 0 | assistant     | call search_requirements(query=Check REQ-2.1 (Tier Upgrades) against the code.)  (0.01s)
+[SCRIPTED LLM] hop 1 | execute_tools | search_requirements -> status=success [phase REQUIREMENT_RESOLVED]  (0.01s)
+[SCRIPTED LLM] hop 1 | assistant     | call propose_tests(requirement_id=REQ-2.1)  (0.01s)
+[SCRIPTED LLM] hop 2 | execute_tools | propose_tests -> status=success [phase TESTS_PROPOSED]  (0.01s)
+[SCRIPTED LLM] hop 2 | assistant     | call run_tests(requirement_id=REQ-2.1, test_file=test_req_2_1_b71b0f41.py)  (0.0s)
+[SCRIPTED LLM] hop 3 | execute_tools | run_tests -> status=success test_outcome=failed [phase TESTS_RUN_FAILED]  (5.56s)
+[SCRIPTED LLM] hop 3 | assistant     | call draft_issue(requirement_id=REQ-2.1, title=REQ-2.1: implementation contradicts the requiremen..., summary=CODE defect: the failing tests check behaviour the..., failing_tests=['sandbox.generated.test_req_2_1_b71b0f41::test_up...)  (0.0s)
+[SCRIPTED LLM] hop 4 | execute_tools | draft_issue -> status=success [phase ISSUE_DRAFTED]  (0.01s)
+[SCRIPTED LLM] hop 4 | assistant     | call file_issue(draft_path=ISSUE-REQ-2.1-20261011T054918Z.md)  (0.0s)
+[SCRIPTED LLM] [CASE HISTORY] REQ-2.1: run_tests -> failed (1 failed) 2026-10-11; run_tests -> passed 2026-10-11
+[SCRIPTED LLM] [ADVISORY] FIRST FAILURE: previously passing (possible regression or flaky/incorrect generated test). (advisory only - the decision is yours)
+[SCRIPTED LLM]  Authorize this action? [y/N]: hop 5 | execute_tools | file_issue -> status=success [phase DONE]  (0.04s)
+[SCRIPTED LLM] hop 5 | assistant     | final answer  (0.0s)
+[SCRIPTED LLM] Stop reason: issue_filed (final phase DONE)
 ```
 
-1. **State Cleanliness:** `AgentState` schema defines only `messages: List[BaseMessage]` and `hops: int`. Memory is never injected into `AgentState`.
-2. **Injection Defense:** Malicious payloads stored in historical tool arguments or status messages cannot reach the LLM's system prompt or messages list, preventing prompt-injection attacks via historical logs.
-3. **Multi-Tenant Isolation:** `get_case_history(user_id)` strictly partitions log entries by `user_id`. One user's history cannot leak into another user's approval gate.
+The advisory says **FIRST FAILURE: previously passing**: the human knows run 1 passed a moment ago,
+so this failure is new. Here it is explained by the planted defect; in real use the advisory tells
+the human to check whether the generated test or the code is wrong before filing.
 
----
+### Run 3: planted defect again → recurring failure → human rejects
 
-## 5. Automated Verification & Test Evidence
+```text
+[SCRIPTED LLM] hop 0 | assistant     | call search_requirements(query=Check REQ-2.1 (Tier Upgrades) against the code.)  (0.01s)
+[SCRIPTED LLM] hop 1 | execute_tools | search_requirements -> status=success [phase REQUIREMENT_RESOLVED]  (0.01s)
+[SCRIPTED LLM] hop 1 | assistant     | call propose_tests(requirement_id=REQ-2.1)  (0.0s)
+[SCRIPTED LLM] hop 2 | execute_tools | propose_tests -> status=success [phase TESTS_PROPOSED]  (0.01s)
+[SCRIPTED LLM] hop 2 | assistant     | call run_tests(requirement_id=REQ-2.1, test_file=test_req_2_1_46117408.py)  (0.0s)
+[SCRIPTED LLM] hop 3 | execute_tools | run_tests -> status=success test_outcome=failed [phase TESTS_RUN_FAILED]  (4.37s)
+[SCRIPTED LLM] hop 3 | assistant     | call draft_issue(requirement_id=REQ-2.1, title=REQ-2.1: implementation contradicts the requiremen..., summary=CODE defect: the failing tests check behaviour the..., failing_tests=['sandbox.generated.test_req_2_1_46117408::test_up...)  (0.0s)
+[SCRIPTED LLM] hop 4 | execute_tools | draft_issue -> status=success [phase ISSUE_DRAFTED]  (0.02s)
+[SCRIPTED LLM] hop 4 | assistant     | call file_issue(draft_path=ISSUE-REQ-2.1-20261011T054930Z.md)  (0.0s)
+[SCRIPTED LLM] [CASE HISTORY] REQ-2.1: run_tests -> failed (1 failed) 2026-10-11; run_tests -> failed (1 failed) 2026-10-11; run_tests -> passed 2026-10-11
+[SCRIPTED LLM] [ADVISORY] RECURRING: failed in 2 of the last 3 runs. (advisory only - the decision is yours)
+[SCRIPTED LLM]  Authorize this action? [y/N]: hop 5 | execute_tools | file_issue -> status=approval_required [phase STOPPED]  (0.03s)
+[SCRIPTED LLM] hop 5 | assistant     | final answer  (0.0s)
+[SCRIPTED LLM] Stop reason: human_rejection (final phase STOPPED)
+```
 
-All behavioral and safety guarantees are codified in the automated test suite [`tests/test_memory_behavior.py`](file:///C:/Users/PC%2012/Desktop/QA_agent/software-engineering-qa-agent/tests/test_memory_behavior.py):
+The advisory now says **RECURRING: failed in 2 of the last 3 runs**. The human still decided to
+reject, and the agent stopped with `human_rejection` and filed nothing. History informed the
+decision but did not make it.
 
-| Test Case | Property Verified | Verification Mechanism | Status |
-| :--- | :--- | :--- | :---: |
-| `test_memory_surfaces_legitimate_audit_history` | Legitimate Task Improvement | Asserts history records ordered execution timestamps, status, and hop counts accurately. | **PASS** |
-| `test_memory_tenant_isolation` | Multi-Tenant Data Isolation | Asserts `user_A` history is never visible or retrievable when querying `user_B`. | **PASS** |
-| `test_memory_never_silently_bypasses_human_approval` | Non-Silent Control Guard | Asserts pre-seeded historical upgrade in memory does not bypass human gate or mint valid approval token. | **PASS** |
-| `test_memory_not_in_llm_state` | Architectural State Isolation | Asserts `AgentState` schema contains only `messages` and `hops`, with no memory leakage into LLM state. | **PASS** |
+## 3. Guard and behaviour tests
 
-### Test Execution Output
 ```text
 ============================= test session starts =============================
-platform win32 -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
-rootdir: C:\Users\PC 12\Desktop\QA_agent\software-engineering-qa-agent
+platform win32 -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- D:\New folder\software-engineering-qa-agent\venv\Scripts\python.exe
+rootdir: D:\New folder\software-engineering-qa-agent
 plugins: anyio-4.13.0, langsmith-0.14.0
-collected 4 items
+collecting ... collected 15 items
 
-tests\test_memory_behavior.py ....                                       [100%]
+tests/test_memory.py::test_record_and_retrieve_round_trip PASSED         [  6%]
+tests/test_memory.py::test_records_hold_only_metadata_fields PASSED      [ 13%]
+tests/test_memory.py::test_get_case_history_empty_when_no_file PASSED    [ 20%]
+tests/test_memory.py::test_delete_requirement_history PASSED             [ 26%]
+tests/test_memory.py::test_purge_expired_records PASSED                  [ 33%]
+tests/test_memory.py::test_advisory_recurring_failure PASSED             [ 40%]
+tests/test_memory.py::test_advisory_first_failure_after_passing_runs PASSED [ 46%]
+tests/test_memory.py::test_advisory_first_run_and_no_history PASSED      [ 53%]
+tests/test_memory.py::test_format_history_line PASSED                    [ 60%]
+tests/test_memory.py::test_case_history_never_reaches_llm_or_token PASSED [ 66%]
+tests/test_memory_behavior.py::test_memory_surfaces_legitimate_audit_history PASSED [ 73%]
+tests/test_memory_behavior.py::test_memory_tenant_isolation PASSED       [ 80%]
+tests/test_memory_behavior.py::test_memory_never_silently_bypasses_human_approval PASSED [ 86%]
+tests/test_memory_behavior.py::test_history_full_of_approvals_cannot_bypass_file_issue_gate PASSED [ 93%]
+tests/test_memory_behavior.py::test_memory_not_in_llm_state PASSED       [100%]
 
-======================== 4 passed, 1 warning in 0.52s =========================
+============================= 15 passed in 5.45s ==============================
 ```
 
----
-
-## 6. Conclusion & Compliance Summary
-
-Inspectra's persistent memory design satisfies all requirements for Week 6 Activity 4:
-* **Legitimate Improvement:** Surfaces actionable audit trails to human operators, enabling detection of repeated attempts, loops, and suspicious patterns.
-* **Non-Silent Control:** Memory acts strictly as an advisory view for the human operator; it possesses zero capability to auto-approve, forge tokens, or bypass authorization gates.
-* **Formally Verified:** Backed by 4 passing unit and safety tests in `tests/test_memory_behavior.py`.
+| Guarantee | Test |
+|---|---|
+| History printed to the operator, absent from `ToolMessage`s, state fields and the messages `assistant()` sends to the LLM | `test_case_history_never_reaches_llm_or_token` |
+| Approval token arguments contain only `{"draft_path": ...}` | `test_case_history_never_reaches_llm_or_token` |
+| Ten earlier filings and passing runs in memory still do not allow `file_issue` without a fresh token | `test_history_full_of_approvals_cannot_bypass_file_issue_gate` |
+| `AgentState` has no field through which history could enter | `test_memory_not_in_llm_state` |
+| Records keep only metadata (no test output, code or requirement text) | `test_records_hold_only_metadata_fields` |
+| Deletion and 30-day purge | `test_delete_requirement_history`, `test_purge_expired_records` |

@@ -1,177 +1,115 @@
-# Memory Design and Data Handling Note
+# Memory Design and Data Handling Note — Week 6 (realigned)
 
-**Project:** Software-Engineering QA Agent (Inspectra)  
-**System:** Bounded Autonomous Subscription & QA Agent  
-**Deliverable:** Week 6 Deliverable 2 (Activities 2 & 3: Memory, State, and Interoperability)  
-**Date:** October 2026  
-**Implementation Source:** [`src/memory.py`](../../src/memory.py), [`src/tool_calling.py`](../../src/tool_calling.py), [`src/approval.py`](../../src/approval.py)  
-**Verification Evidence:** [`tests/test_memory_behavior.py`](../../tests/test_memory_behavior.py), [`evidence/memory_evaluation_evidence.md`](../../evidence/memory_evaluation_evidence.md)  
+**Project:** Software-Engineering QA Agent (Inspectra)
+**Code:** [`src/memory.py`](../../src/memory.py); used in `_run_one_tool()` and `execute_tools()` in
+[`src/tool_calling.py`](../../src/tool_calling.py)
+**Tests:** [`tests/test_memory.py`](../../tests/test_memory.py), [`tests/test_memory_behavior.py`](../../tests/test_memory_behavior.py)
+**Evidence:** [`evidence/memory_evaluation_evidence.md`](../../evidence/memory_evaluation_evidence.md)
 
----
+This replaces the earlier note, which described a customer case history keyed by `user_id`. The
+old version is in git history.
 
-## 1. Executive Summary & Architectural Scope
+## 1. The use case: requirement test-run history
 
-This document specifies the design, operational justification, access control rules, retention limits, and deletion procedures for the persistent memory subsystem of **Inspectra**. 
+Inspectra keeps one persistent memory: **the history of test runs per requirement** (for example
+`REQ-2.1`).
 
-In accordance with Week 6 requirements, Inspectra distinguishes between:
-1. **Ephemeral Workflow/Session State (`AgentState`)**: In-memory, non-persistent, bounded LangGraph state that exists solely for the duration of a single `run(prompt)` invocation.
-2. **Justified Persistent Memory (`CaseHistoryMemory`)**: An append-only, structured log stored on disk (`data/memory/case_history.jsonl`) that records operational execution outcomes to assist human decision-makers during high-impact action approvals.
+**Why it is justified.** When tests fail, the human must decide whether to file an issue. A single
+failing run is ambiguous: it may be a real regression, or a flaky or incorrect *generated* test.
+Knowing how earlier runs for the same requirement went makes that decision better:
+- previously passing and now failing → a likely regression, or a wrong new test;
+- failing again and again → a stable defect worth filing.
 
-Following the core principle of **bounded autonomy**, persistent memory in Inspectra operates in a strictly **advisory capacity for human approvers**. It does not persist raw conversational transcripts, does not alter the system prompt, and is strictly prohibited from bypassing human approval gates or forging authorization tokens.
+The current run cannot provide that information; only memory can.
 
----
+**What it does.** Before `file_issue` or `save_test_to_suite`, the approval prompt shows the last
+three `run_tests` outcomes and a deterministic advisory:
 
-## 2. What is Stored (and What is Excluded)
-
-### 2.1 Storage Format and Location
-* **Storage Medium:** Flat file on local disk in JSON Lines format (`.jsonl`).
-* **Storage Path:** `data/memory/case_history.jsonl` (relative to project root).
-* **Concurrency Control:** Process-level thread synchronization (`threading.Lock`) ensuring atomic appends and safe concurrent reads across worker threads.
-
-### 2.2 Record Schema
-Every entry in `case_history.jsonl` represents a completed or intercepted tool-call event. Each record conforms strictly to the following 5-field schema:
-
-| Field Name | Type | Description | Example |
-| :--- | :--- | :--- | :--- |
-| `timestamp` | `string` (ISO-8601 UTC) | Exact UTC timestamp of the execution attempt. | `"2026-10-09T11:45:00.123456+00:00"` |
-| `user_id` | `string` | Unique identifier of the user account subject to the operation. | `"u123"` |
-| `tool_name` | `string` | The deterministic tool identifier invoked or intercepted. | `"upgrade_user_subscription"` |
-| `status` | `string` | Outcome status code of the tool invocation. | `"success"`, `"failed_tier_downgrade_disallowed"`, `"approval_required"`, `"rejected"` |
-| `hops` | `integer` | Count of reasoning hops consumed in the session prior to tool invocation. | `2` |
-
-#### Canonical JSON Representation
-```json
-{
-  "timestamp": "2026-10-09T11:45:00.123456+00:00",
-  "user_id": "u123",
-  "tool_name": "upgrade_user_subscription",
-  "status": "success",
-  "hops": 2
-}
+```
+[CASE HISTORY] REQ-2.1: run_tests -> failed (1 failed) 2026-10-11; run_tests -> failed (1 failed) 2026-10-11; run_tests -> passed 2026-10-11
+[ADVISORY] RECURRING: failed in 2 of the last 3 runs. (advisory only - the decision is yours)
+ Authorize this action? [y/N]:
 ```
 
-### 2.3 Explicit Data Minimization: What is Excluded
-Under the GDPR principle of **data minimization** (Article 5(1)(c)), persistent memory excludes any data that is not strictly necessary for operational safety auditing:
+| Advisory | Rule (from the last 3 `run_tests` records, newest first) |
+|---|---|
+| `RECURRING: failed in N of the last M runs.` | Newest run failed and at least 2 runs failed |
+| `FIRST FAILURE: previously passing (possible regression or flaky/incorrect generated test).` | Newest run failed, earlier runs passed |
+| `FIRST RUN: no earlier test runs to compare with.` | Only one run on record |
+| `LATEST RUN PASSED: ...` | Newest run passed |
+| `NO HISTORY: ...` | No runs on record |
 
-1. **No Personally Identifiable Information (PII):** User emails, real names, phone numbers, IP addresses, and billing credentials are never captured in memory. Only an opaque `user_id` is maintained.
-2. **No Natural Language Transcripts:** Raw user chat messages, conversational banter, and LLM internal reasoning chains are discarded when the session ends. They are never written to disk.
-3. **No Cryptographic Tokens or Secrets:** HMAC-SHA256 authorization tokens (`approval_token`), server secrets, and API keys are strictly excluded from logs.
-4. **No Unstructured Payloads:** Tool arguments that could potentially contain arbitrary text are discarded; only the static tool name and structured execution status code are persisted.
+## 2. It does not silently control decisions
 
----
+- **Advisory only.** History never approves or rejects anything. The human still answers `y/N`, and
+  a fresh signed single-use token is still required
+  (`test_history_full_of_approvals_cannot_bypass_file_issue_gate`).
+- **Never sent to the LLM.** It is printed to the console only. It is not added to `messages`,
+  `ToolMessage` content or any state field (`test_case_history_never_reaches_llm_or_token`).
+- **Not part of the token.** The approval token hashes only the tool's own arguments
+  (`{"draft_path": ...}`), checked in the same guard test.
+- **Deterministic.** The advisory is computed by code from stored outcomes; no model is involved.
 
-## 3. Why It is Stored (Justification)
+## 3. What is stored, and what is not
 
-Persistent case history is implemented to solve a concrete failure mode in multi-step AI agents: **context blindness during high-impact operations**.
+Format: JSON Lines, one record per executed tool call, at `data/memory/case_history.jsonl`.
 
-### 3.1 Operational Rationale
-When an autonomous agent requests human approval for a high-impact action (such as `upgrade_user_subscription`), evaluating the request in isolation creates severe blind spots:
-* **Repeated Failure Detection:** An approver needs to know whether the user has experienced 4 consecutive failures in the last 10 minutes due to billing locks or system errors.
-* **Brute-Force & Abuse Prevention:** If an adversarial user triggers repeated upgrade calls to stress internal APIs, the approver can immediately spot the burst of repeated requests and reject the action.
-* **Operational Velocity:** Approvers can verify whether an upgrade request is an initial inquiry or a re-attempt following an infrastructure outage.
+| Field | Example | Notes |
+|---|---|---|
+| `timestamp` | `2026-10-11T05:49:18.2+00:00` | UTC ISO 8601 |
+| `requirement_id` | `REQ-2.1` | Key |
+| `tool_name` | `run_tests` | One of the six approved tools |
+| `status` | `success` | The tool's own outcome |
+| `hops` | `2` | Hop count when the call ran |
+| `test_outcome` | `failed` | `run_tests` only, otherwise `null` |
+| `failed_count` | `1` | `run_tests` only: failed + errors |
 
-### 3.2 Legitimate Improvement Without Silent Control
-As formally verified in [`tests/test_memory_behavior.py`](../../tests/test_memory_behavior.py) and documented in [`evidence/memory_evaluation_evidence.md`](../../evidence/memory_evaluation_evidence.md):
-* **Contextual Uplift:** The human operator is provided with the user's last $N$ actions (default $N = 3$) at the moment of approval interception:
-  ```text
-  [CASE HISTORY] last 2 action(s) for u123:
-    1. upgrade_user_subscription -> failed_tier_downgrade_disallowed (2026-10-09T11:30:12Z)
-    2. get_user_subscription_status -> success (2026-10-09T11:42:01Z)
-  [HUMAN APPROVAL REQUIRED] - HIGHER-IMPACT ACTION INTERCEPTED
-  Tool: upgrade_user_subscription
-  Arguments: {"user_id": "u123", "target_tier": "enterprise"}
-  Authorize this action? [y/N]:
-  ```
-* **Strict Non-Silent Decision Boundary:** The presence of historical success records in `case_history.jsonl` **cannot**:
-  * Bypass the human approval gate.
-  * Reduce the required approval threshold.
-  * Auto-generate a valid cryptographic approval token.
-  * Alter the tool's deterministic validation rules.
+**Not stored:** test code, test output or failure messages, requirement text, prompts or model
+replies, file contents, approval tokens, API keys or GitHub tokens.
 
----
+**The records contain no personal data.** They describe test runs of a software requirement, not
+people. (The earlier GDPR "right to be forgotten" framing applied to customer records and no longer
+applies.)
 
-## 4. Access Control & Security Boundaries: Who Can Access
+Calls refused by the phase guard, or skipped as extra calls in one step, are not executed and are
+therefore not recorded.
 
-Access to persistent memory is strictly governed by the principle of least privilege. The following Role-Based Access Control (RBAC) matrix governs all interactions:
+## 4. Who can access it
 
-| Actor / Component | Read Access | Write Access | Access Mechanism | Security Purpose |
-| :--- | :---: | :---: | :--- | :--- |
-| **Human Approver / Operator** | **Yes** | **No** | Formatted console / UI summary via `_run_one_tool()` | Inspect past actions before granting HMAC approval. |
-| **Agent / LLM Core** | **No** | **No** | Completely firewalled; not present in `AgentState` | Prevents prompt-injection attacks and hallucinated authority. |
-| **Execution Orchestrator** | **Yes** | **Yes** | `record_case()` and `get_case_history()` in `src/memory.py` | Appends completed tool outcomes; retrieves bounded history. |
-| **End User / API Client** | **No** | **No** | No direct endpoint or RPC access | Prevents enumeration of operational logs across tenants. |
-| **System Auditor / Admin** | **Yes** | **Yes (Purge)** | Direct log access / Administrative maintenance CLI | System monitoring, compliance audits, and data erasure. |
+| Who | Access |
+|---|---|
+| Developers with access to the machine or working copy | Read/write the file directly. It is git-ignored (`data/`), so it is never pushed. |
+| The human approver | Sees the last 3 runs + advisory at the approval prompt |
+| The LLM | **None** |
+| MCP clients | **None**: the server prints history on its own console only |
 
-### 4.1 Tenant Isolation
-To prevent multi-tenant data leakage:
-* `get_case_history(user_id: str)` strictly filters records matching the exact target `user_id`.
-* One user's execution history is never mingled with, or visible during the review of, another user's session.
-* Tenant isolation is verified by automated regression test `test_memory_tenant_isolation`.
+Writes and reads are guarded by a `threading.Lock`, so concurrent runs in one process do not
+interleave lines.
 
-### 4.2 LLM Decoupling Firewall
-A critical vulnerability in naive memory implementations is feeding historical logs directly into the LLM prompt. Inspectra enforces an architectural firewall:
-* The LangGraph state schema (`AgentState`) contains strictly `messages: List[BaseMessage]` and `hops: int`.
-* `case_history.jsonl` is read directly by the orchestrator tool runner and emitted exclusively to standard output (or human operator console).
-* Memory entries are **never converted into `HumanMessage` or `ToolMessage`** objects in the LangGraph graph, guaranteeing that external actors cannot poison future LLM reasoning via forged historical status logs.
+## 5. Retention
 
----
+Records are kept for **30 days** (`RETENTION_DAYS`). `purge_expired_records(retention_days=30)`
+removes older records and returns the count. Purging is run manually (or from a scheduled job);
+nothing calls it automatically at the moment.
 
-## 5. Retention Policy
+## 6. Deletion
 
-To avoid unbounded log growth and adhere to data privacy standards, Inspectra applies a deterministic retention schedule:
+- **One requirement:** `delete_requirement_history("REQ-2.1")` removes all its records and returns the count.
+- **Everything:** delete `data/memory/case_history.jsonl`; it is recreated on the next run.
+- **Tests:** `tests/conftest.py` points memory at a temp file for every test, so tests never touch
+  the real file.
 
-### 5.1 Retention Schedule
-* **Active Operational Window:** Case history records are retained for a rolling duration of **30 calendar days** from the record's `timestamp`.
-* **Rationale for 30-Day Window:** Subscription billing cycles and dispute resolution windows operate on monthly cycles. A 30-day window provides sufficient operational context for billing reviews while preventing indefinite data hoards.
-* **Retention Cap:** If an individual user account exceeds **50 historical records** within 30 days, older records for that user are pruned to prevent log saturation attacks.
+## 7. Verification
 
-### 5.2 Storage Capacity Bounds
-Because records are minimal (~120 bytes per JSONL entry):
-* $1,000$ tool executions $\approx$ $120\text{ KB}$.
-* $100,000$ tool executions $\approx$ $12\text{ MB}$.
-Storage overhead remains negligible, allowing file-locked JSONL storage to operate efficiently without heavy external database dependencies.
-
----
-
-## 6. Deletion Procedures & Data Subject Rights
-
-Inspectra provides clear operational mechanisms for purging persistent memory in compliance with GDPR Article 17 ("Right to be Forgotten") and system lifecycle policies.
-
-### 6.1 User-Requested Erasure (Right to be Forgotten)
-When a user requests erasure of their account data or exercises their right to be forgotten:
-1. An administrator or automated account-deletion webhook triggers the purge function:
-   ```python
-   delete_user_case_history(user_id: str) -> int
-   ```
-2. The orchestrator acquires the process file lock (`_LOCK`).
-3. `case_history.jsonl` is atomically read, all records matching `user_id` are excised, and the remaining records are written back.
-4. The number of excised records is logged for audit compliance without retaining any personal identifiers.
-
-### 6.2 Rolling Retention Purge Procedure
-Automated maintenance purges expired records based on timestamp:
-```python
-purge_expired_records(retention_days: int = 30) -> int
-```
-* **Execution Frequency:** Scheduled to run daily as an administrative batch job or on application initialization.
-* **Mechanism:** Records with `timestamp < (now - retention_days)` are filtered out atomically.
-* **Zero Shadow Copies:** In accordance with secure erasure practices, temporary scratch buffers used during atomic rewrites are unlinked immediately.
-
-### 6.3 Emergency / Test Teardown Purge
-For test environments and sandbox resets:
-* `clear_all_memory()` or direct deletion of `data/memory/case_history.jsonl` provides a clean slate.
-* Unit test suites automatically use isolated temporary directories or mock file fixtures to prevent polluting production logs (see [`tests/test_memory.py`](../../tests/test_memory.py)).
-
----
-
-## 7. Verification & Compliance Matrix
-
-| Requirement (Course Brief Week 6) | Document Section | Implementation & Test Evidence | Status |
-| :--- | :--- | :--- | :---: |
-| **What is stored** | Section 2.1 – 2.2 | `record_case()` in [`src/memory.py`](../../src/memory.py) | **Verified** |
-| **Data minimization (what is not stored)** | Section 2.3 | `AgentState` schema in [`src/tool_calling.py`](../../src/tool_calling.py) | **Verified** |
-| **Why it is stored (justification)** | Section 3.1 – 3.2 | Operational review flow in [`src/tool_calling.py`](../../src/tool_calling.py) | **Verified** |
-| **Who can access it (RBAC)** | Section 4.0 – 4.2 | `test_memory_tenant_isolation` in [`tests/test_memory_behavior.py`](../../tests/test_memory_behavior.py) | **Verified** |
-| **Retention policy** | Section 5.1 – 5.2 | Rolling 30-day / 50-record cap specification | **Specified** |
-| **Deletion procedures** | Section 6.1 – 6.3 | Purge and erasure procedures specified | **Specified** |
-| **Non-silent control guarantee** | Section 3.2 | `test_memory_never_silently_bypasses_human_approval` | **Verified** |
-
+| Property | Test |
+|---|---|
+| Round trip, newest first, limit, filter by tool | `test_record_and_retrieve_round_trip` |
+| Only metadata fields stored | `test_records_hold_only_metadata_fields` |
+| Empty before the first run | `test_get_case_history_empty_when_no_file` |
+| Deletion | `test_delete_requirement_history` |
+| 30-day purge | `test_purge_expired_records` |
+| Advisory wording | `test_advisory_*`, `test_format_history_line` |
+| Never reaches the LLM / token | `test_case_history_never_reaches_llm_or_token` |
+| Cannot bypass approval | `test_history_full_of_approvals_cannot_bypass_file_issue_gate`, `test_memory_never_silently_bypasses_human_approval` |
+| run_tests outcome recorded | `test_run_tests_outcome_is_recorded_in_memory` |
+| GitHub token never stored | `test_github_token_never_in_tool_message_or_memory` |

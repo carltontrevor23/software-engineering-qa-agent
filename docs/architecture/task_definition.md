@@ -1,74 +1,51 @@
-# Week 5 — Task Definition (Activity 1)
+# Week 5 — Task Definition (realigned)
 
+**Project:** Software-Engineering QA Agent (Inspectra)
+
+This replaces the earlier task definition ("resolve a user's subscription upgrade request"), in
+which the agent operated the subscription service. The agent now tests it. The old version is in
+git history.
 
 ## Task
-Resolve a user's subscription upgrade request end to end, from a
-single natural-language ask (e.g. "please upgrade user u123 to
-premium") through to either a completed, human-approved upgrade or a
-clearly explained refusal.
 
-## Why this genuinely requires multi-step decision making
-A single tool call cannot do this correctly, and that is not a
-design choice, it is forced by what already exists in the codebase:
+For **one requirement** of the system under test (for example `REQ-2.1`, Tier Upgrades in
+`docs/requirements/subscription.md`), Inspectra proposes tests, runs them in the sandbox, and then
+does one of two things:
+- reports that the implementation meets the requirement, or
+- explains the failure and drafts an issue, which a human approves or rejects before it is filed.
 
-1. `upgrade_user_subscription` cannot be called safely without first
-   knowing the user's current tier, status, and balance, since
-   `process_upgrade()` raises different, meaningful errors
-   (`InactiveUserError`, `InsufficientFundsError`,
-   `UserNotFoundError`) depending on that state. The agent has to
-   call `get_user_subscription_status` first and branch on the
-   result, not guess.
-2. `upgrade_user_subscription` is registered in
-   `approval.py`'s `HIGH_IMPACT_TOOLS` set, meaning it is explicitly
-   classified as needing human sign-off. But as currently wired in
-   `src/tool_calling.py`, the tool's function signature only accepts
-   `user_id`, there is no `approval_token` parameter, and nothing in
-   `execute_tools()` calls `request_human_approval()` or
-   `verify_and_consume_token()` before invoking it. The approval
-   system exists and is well built (signed, single-use, 120-second
-   TTL, tool- and argument-bound tokens), it is just not connected to
-   the one tool it was built to gate.
-3. Because of that gap, this task is not "call one tool, done", it is
-   genuinely: sense current state, decide whether the request is even
-   valid, stop and hand off to a human before acting, only then act,
-   then observe whether the act actually succeeded (ledger write can
-   still fail), and report accordingly. Removing any one of those
-   steps either breaks correctness (skipping the status check) or
-   breaks the safety guarantee Week 4 was supposed to establish
-   (skipping the approval gate).
+A typical request: *"Check REQ-2.1 (Tier Upgrades) against the code."*
 
-## Sense -> Plan/Decide -> Act/Tool -> Observe -> Stop, applied here
-- **Sense**: call `get_user_subscription_status(user_id)`.
-- **Plan/Decide**: given tier, status, and balance, decide whether an
-  upgrade is even eligible. If not eligible, stop here with a clear
-  explanation, no approval request is raised for an action that
-  would just fail anyway.
-- **Act (gated)**: if eligible, request human approval via
-  `approval.py`'s `request_human_approval("upgrade_user_subscription", {...})`.
-  Only if approved, call `upgrade_user_subscription` with the
-  resulting `approval_token`.
-- **Observe**: check the tool's returned `status`. Success means the
-  ledger write actually happened, not just that the function
-  returned without raising.
-- **Stop/Re-plan**: on success, report the new tier and balance. On
-  rejection (human said no) or failure (ledger write error), stop
-  and report why, do not silently retry a rejected or failed
-  higher-impact action.
+## Why this genuinely needs multi-step decisions
 
-## What this task exposes as still needing implementation work
-This definition surfaces the concrete engineering task for the rest
-of Week 5, not just a diagram exercise:
-- `upgrade_user_subscription`'s signature in `src/tool_calling.py`
-  needs an `approval_token` parameter, and its body needs to call
-  `verify_and_consume_token()` before calling
-  `manager.process_upgrade()`, returning an error if verification
-  fails.
-- `execute_tools()` needs to detect when a high-impact tool is being
-  called (via `approval.is_high_impact(tool_name)`), pause, call
-  `request_human_approval()`, and only proceed to
-  `tool_obj.invoke()` if approved, attaching the resulting token to
-  the arguments.
-- This is also the natural point to enforce a maximum iteration
-  count on the assistant/execute_tools loop, since the graph as
-  currently built allows the loop to run indefinitely if the model
-  keeps deciding to call tools.
+No single tool call can do this, and the next step depends on what the previous step observed:
+
+| After... | Observed | Next step |
+|---|---|---|
+| `search_requirements` | No matching requirement | Stop: `requirement_not_found` |
+| `search_requirements` | A matching `REQ-X.Y` | `propose_tests` for that id |
+| `propose_tests` | Error (model unavailable, unsafe code rejected, model refusal) | Stop: `tool_error` |
+| `propose_tests` | A test file in `sandbox/generated/` | `run_tests` on that file |
+| `run_tests` | `test_outcome = passed` | Report and stop: `all_tests_passed` |
+| `run_tests` | Failed, and the failing test expects something the requirement does not say | **Test defect**: report and stop, file nothing (`test_defect_reported`) |
+| `run_tests` | Failed, and the behaviour contradicts the requirement | **Code defect**: `draft_issue` |
+| `draft_issue` | A draft path | `file_issue`, which hands off to the human |
+| `file_issue` | Human approves | Filed: `issue_filed` |
+| `file_issue` | Human rejects | Stop: `human_rejection`; the draft stays for review |
+
+The code-vs-test judgement is the part that needs the model. A deterministic script could run the
+steps in order, but it could not decide from failure messages whether the code or the generated
+test is wrong. Filing is the part that needs a human.
+
+## Sense → Plan/Decide → Act → Observe → Stop, mapped to the real tools
+
+| Stage | In Inspectra |
+|---|---|
+| **Sense** | The developer's request, plus each tool result returned as a `ToolMessage` |
+| **Plan / Decide** | Gemini, following `prompts/agent_system_prompt_v2.0.txt`, chooses the next approved tool (one per step) |
+| **Act** | `search_requirements`, `propose_tests`, `run_tests`, `draft_issue`; `file_issue` / `save_test_to_suite` only through the human approval gate |
+| **Observe** | `status` (the tool's outcome) and `test_outcome` (the tests' result) in each result |
+| **Stop / Re-plan** | Stops on a stop condition or at `MAX_HOPS = 7`; may re-plan once (for example a second search) |
+
+Full contract: [`agent_task_contract.md`](agent_task_contract.md). Loop details:
+[`agent_control_loop_spec.md`](agent_control_loop_spec.md).

@@ -384,10 +384,10 @@ if __name__ == "__main__":
         template_path = str(PROJECT_ROOT / "prompts" / "v1.0_test_proposal.txt")
 
         # 1. Load your Python file directly from disk into module_description
-        source_code_path = PROJECT_ROOT / "src" / "subscription_manager.py"
+        source_code_path = PROJECT_ROOT / "sut" / "subscription_service" / "subscription_manager.py"
         with open(source_code_path, "r", encoding="utf-8") as f:
             module_code = f.read()
-            example_module = f"Module: src/subscription_manager.py\n\n{module_code}"
+            example_module = f"Module: sut/subscription_service/subscription_manager.py\n\n{module_code}"
 
         # 2. Retrieve + format context, then build the prompt (Week 3 RAG)
         full_prompt = build_grounded_prompt(
