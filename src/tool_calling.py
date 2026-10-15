@@ -20,6 +20,7 @@ from approval import (
     is_high_impact,
     request_human_approval,
 )
+import guardrails
 import workflow
 from memory import advisory, format_history, get_case_history, record_case
 
@@ -50,7 +51,15 @@ class AgentState(MessagesState):
 
 
 def initial_state(prompt: str) -> Dict[str, Any]:
-    return {"messages": [HumanMessage(content=prompt)], "hops": 0, **workflow.new_workflow()}
+    ok, reason = guardrails.validate_request(prompt)
+    if not ok:
+        guardrails.record("input_rejected", tool="request", reason=reason)
+        raise ValueError(reason)
+    return {
+        "messages": [HumanMessage(content=guardrails.clean_text(prompt))],
+        "hops": 0,
+        **workflow.new_workflow(),
+    }
 
 
 # Tool 1 — read-only RAG search over docs/requirements.
@@ -148,7 +157,10 @@ def assistant(state: AgentState) -> Dict[str, Any]:
             if getattr(response, "tool_calls", None):
                 return {"messages": [response]}
             # Final answer: close the run from the recorded phase, not from the answer text.
-            return {"messages": [response], **workflow.finalize_on_answer(workflow.from_state(state))}
+            wf = workflow.from_state(state)
+            updates = workflow.finalize_on_answer(wf)
+            _validate_final_answer(response, {**wf, **updates})
+            return {"messages": [response], **updates}
         except Exception as e:
             if attempt == max_retries - 1:
                 raise e
@@ -157,6 +169,28 @@ def assistant(state: AgentState) -> Dict[str, Any]:
                 time.sleep(32)
             else:
                 time.sleep(2)
+
+def _answer_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    return str(content or "")
+
+
+def _validate_final_answer(response: AIMessage, wf: Dict[str, Any]) -> None:
+    """Output validation: redact secrets, and withhold claims no tool result supports."""
+    text, redactions = guardrails.redact(_answer_text(response.content))
+    if redactions:
+        guardrails.record("secret_redacted", where="final_answer", count=redactions)
+    problems = guardrails.check_final_answer(text, wf)
+    if problems:
+        guardrails.record("answer_withheld", problems=problems)
+        text = (
+            "[GUARDRAIL] The model's answer was withheld because it "
+            + "; ".join(problems) + ". " + guardrails.verified_summary(wf)
+        )
+    if redactions or problems:
+        response.content = text
+
 
 # STEP 3 — run the requested tool with Human-in-the-Loop interception.
 
@@ -211,8 +245,11 @@ def execute_tools(state: AgentState) -> Dict[str, Any]:
                 result = _run_one_tool(name, args, requirement_id=wf["requirement_id"])
                 wf.update(workflow.apply_result(wf, name, result))
                 executed = True
+        content, redactions = guardrails.redact(str(result))   # output validation
+        if redactions:
+            guardrails.record("secret_redacted", where=name, count=redactions)
         tool_messages.append(
-            ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=name)
+            ToolMessage(content=content, tool_call_id=tool_call["id"], name=name)
         )
         if executed:
             key = wf["requirement_id"] or qa_tools.requirement_id_from_args(tool_call.get("args", {}))
@@ -246,7 +283,11 @@ STOPPED_MESSAGE = "Stopped: reached the maximum number of tool-call steps"
 
 def run(prompt: str) -> str:
     """Sends one prompt through the graph and returns the model's final text answer."""
-    result = graph.invoke(initial_state(prompt))
+    try:
+        state = initial_state(prompt)
+    except ValueError as e:
+        return f"[GUARDRAIL] Request rejected: {e}"
+    result = graph.invoke(state)
     print(f"[stop_reason] {result.get('stop_reason')} (phase {result.get('phase')})")
     # Hop limit hit: the loop ended on a tool result instead of an AI reply.
     if not isinstance(result["messages"][-1], AIMessage):
