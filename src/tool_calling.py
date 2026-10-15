@@ -20,7 +20,9 @@ from approval import (
     is_high_impact,
     request_human_approval,
 )
+import guardrails
 import workflow
+import tracer
 from memory import advisory, format_history, get_case_history, record_case
 
 # Versioned agent prompt (Week 5): the rules live in prompts/, not in code.
@@ -50,7 +52,15 @@ class AgentState(MessagesState):
 
 
 def initial_state(prompt: str) -> Dict[str, Any]:
-    return {"messages": [HumanMessage(content=prompt)], "hops": 0, **workflow.new_workflow()}
+    ok, reason = guardrails.validate_request(prompt)
+    if not ok:
+        guardrails.record("input_rejected", tool="request", reason=reason)
+        raise ValueError(reason)
+    return {
+        "messages": [HumanMessage(content=guardrails.clean_text(prompt))],
+        "hops": 0,
+        **workflow.new_workflow(),
+    }
 
 
 # Tool 1 — read-only RAG search over docs/requirements.
@@ -148,7 +158,10 @@ def assistant(state: AgentState) -> Dict[str, Any]:
             if getattr(response, "tool_calls", None):
                 return {"messages": [response]}
             # Final answer: close the run from the recorded phase, not from the answer text.
-            return {"messages": [response], **workflow.finalize_on_answer(workflow.from_state(state))}
+            wf = workflow.from_state(state)
+            updates = workflow.finalize_on_answer(wf)
+            _validate_final_answer(response, {**wf, **updates})
+            return {"messages": [response], **updates}
         except Exception as e:
             if attempt == max_retries - 1:
                 raise e
@@ -157,6 +170,28 @@ def assistant(state: AgentState) -> Dict[str, Any]:
                 time.sleep(32)
             else:
                 time.sleep(2)
+
+def _answer_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
+    return str(content or "")
+
+
+def _validate_final_answer(response: AIMessage, wf: Dict[str, Any]) -> None:
+    """Output validation: redact secrets, and withhold claims no tool result supports."""
+    text, redactions = guardrails.redact(_answer_text(response.content))
+    if redactions:
+        guardrails.record("secret_redacted", where="final_answer", count=redactions)
+    problems = guardrails.check_final_answer(text, wf)
+    if problems:
+        guardrails.record("answer_withheld", problems=problems)
+        text = (
+            "[GUARDRAIL] The model's answer was withheld because it "
+            + "; ".join(problems) + ". " + guardrails.verified_summary(wf)
+        )
+    if redactions or problems:
+        response.content = text
+
 
 # STEP 3 — run the requested tool with Human-in-the-Loop interception.
 
@@ -172,6 +207,7 @@ def _run_one_tool(tool_name: str, args: Dict[str, Any], requirement_id: Optional
         print(format_history(case_key, history))
         print(f"[ADVISORY] {advisory(history)} (advisory only - the decision is yours)")
         approved, token, message = request_human_approval(tool_name, args)
+        tracer.record_approval_event(tool_name, args, "APPROVED" if approved else "REJECTED")
         if not approved:
             return {"status": "approval_required", "error": message}
         args["approval_token"] = token               # signed, single-use
@@ -211,8 +247,11 @@ def execute_tools(state: AgentState) -> Dict[str, Any]:
                 result = _run_one_tool(name, args, requirement_id=wf["requirement_id"])
                 wf.update(workflow.apply_result(wf, name, result))
                 executed = True
+        content, redactions = guardrails.redact(str(result))   # output validation
+        if redactions:
+            guardrails.record("secret_redacted", where=name, count=redactions)
         tool_messages.append(
-            ToolMessage(content=str(result), tool_call_id=tool_call["id"], name=name)
+            ToolMessage(content=content, tool_call_id=tool_call["id"], name=name)
         )
         if executed:
             key = wf["requirement_id"] or qa_tools.requirement_id_from_args(tool_call.get("args", {}))
@@ -244,20 +283,58 @@ graph = builder.compile()
 STOPPED_MESSAGE = "Stopped: reached the maximum number of tool-call steps"
 
 
-def run(prompt: str) -> str:
-    """Sends one prompt through the graph and returns the model's final text answer."""
-    result = graph.invoke(initial_state(prompt))
+def run(prompt: str, capture_trace: bool = True) -> str:
+    """Sends one prompt through the graph, records observability trace, and returns the model's final text answer."""
+    import time
+    from datetime import datetime, timezone
+
+    start_time = time.perf_counter()
+    start_utc = datetime.now(timezone.utc).isoformat()
+    try:
+        state = initial_state(prompt)
+    except ValueError as e:
+        err_msg = str(e)
+        duration_s = time.perf_counter() - start_time
+        if capture_trace:
+            tracer.record_input_rejection_trace(
+                prompt=prompt,
+                error_message=err_msg,
+                start_utc=start_utc,
+                duration_s=duration_s,
+                model_name=MODEL_NAME,
+                prompt_version=PROMPT_VERSION,
+            )
+        return f"[GUARDRAIL] Request rejected: {e}"
+
+    result = graph.invoke(state)
+    duration_s = time.perf_counter() - start_time
     print(f"[stop_reason] {result.get('stop_reason')} (phase {result.get('phase')})")
+
+    final_answer = ""
     # Hop limit hit: the loop ended on a tool result instead of an AI reply.
     if not isinstance(result["messages"][-1], AIMessage):
-        return STOPPED_MESSAGE
-    final_replies = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
-    if not final_replies:
-        return ""
-    content = final_replies[-1].content
-    if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
-    return content
+        final_answer = STOPPED_MESSAGE
+    else:
+        final_replies = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
+        if final_replies:
+            content = final_replies[-1].content
+            if isinstance(content, list):
+                final_answer = "".join(b.get("text", "") for b in content if isinstance(b, dict))
+            else:
+                final_answer = str(content)
+
+    if capture_trace:
+        tracer.record_execution_trace(
+            prompt=prompt,
+            final_state=result,
+            final_answer=final_answer,
+            start_utc=start_utc,
+            duration_s=duration_s,
+            model_name=MODEL_NAME,
+            prompt_version=PROMPT_VERSION,
+        )
+
+    return final_answer
 
 
 if __name__ == "__main__":

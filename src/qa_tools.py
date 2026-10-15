@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+import guardrails
 import sandbox
 from approval import verify_and_consume_token
 from model_client import ModelCallError, build_test_proposal_prompt, get_model_response
@@ -94,6 +95,15 @@ def _requirement_id_from_section(section: str) -> Optional[str]:
     return f"REQ-{match.group(1)}" if match else None
 
 
+def _invalid_requirement_id(tool_name: str, requirement_id: Any) -> Optional[Dict[str, Any]]:
+    """Error result for a malformed requirement id (input validation), else None."""
+    reason = guardrails.check_requirement_id(requirement_id)
+    if reason is None:
+        return None
+    guardrails.record("input_rejected", tool=tool_name, reason=reason)
+    return {"status": "error", "error": reason}
+
+
 def _file_slug(requirement_id: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", requirement_id.lower()).strip("_")
 
@@ -119,6 +129,10 @@ def requirement_id_from_args(args: Dict[str, Any]) -> str:
 
 def search_requirements(query: str, top_k: int = 3) -> Dict[str, Any]:
     """BM25 search over docs/requirements (Week 3 RAG)."""
+    invalid = guardrails.check_query(query, top_k)
+    if invalid:
+        guardrails.record("input_rejected", tool="search_requirements", reason=invalid)
+        return {"status": "error", "error": invalid}
     try:
         retriever = build_rag_pipeline(str(REQUIREMENTS_DIR))
     except FileNotFoundError:
@@ -148,6 +162,9 @@ def _sut_module_description() -> str:
 
 def propose_tests(requirement_id: str) -> Dict[str, Any]:
     """Ask the model for pytest tests for one requirement and save them to the sandbox."""
+    invalid = _invalid_requirement_id("propose_tests", requirement_id)
+    if invalid:
+        return invalid
     req = load_requirement(requirement_id)
     if req["status"] != "success":
         return req
@@ -179,12 +196,12 @@ def propose_tests(requirement_id: str) -> Dict[str, Any]:
         1 for node in ast.walk(ast.parse(code))
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     )
+    test_path = sandbox.GENERATED_DIR / f"test_{_file_slug(requirement_id)}_{secrets.token_hex(4)}.py"
     try:
         sandbox.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-        test_path = sandbox.GENERATED_DIR / f"test_{_file_slug(requirement_id)}_{secrets.token_hex(4)}.py"
         test_path.write_text(code, encoding="utf-8")
-    except OSError as e:
-        return {"status": "error", "error": f"Could not write proposed test file: {e}"}
+    except OSError:
+        return {"status": "error", "error": "Could not save the proposed tests, action not completed."}
     return {
         "status": "success",
         "requirement_id": requirement_id,
@@ -195,6 +212,9 @@ def propose_tests(requirement_id: str) -> Dict[str, Any]:
 
 def run_tests(requirement_id: str, test_file: str) -> Dict[str, Any]:
     """Run one allowed test file in the sandbox and report the outcome."""
+    invalid = _invalid_requirement_id("run_tests", requirement_id)
+    if invalid:
+        return invalid
     ok, resolved = sandbox.resolve_test_path(test_file)
     if not ok:
         return {"status": "error", "error": resolved}
@@ -213,29 +233,36 @@ def draft_issue(
     requirement_id: str, title: str, summary: str, failing_tests: List[str]
 ) -> Dict[str, Any]:
     """Write a Markdown issue draft. Low impact: nothing leaves the repo."""
+    invalid = _invalid_requirement_id("draft_issue", requirement_id)
+    if invalid:
+        return invalid
+    bad_fields = guardrails.check_draft_fields(title, summary, failing_tests)
+    if bad_fields:
+        guardrails.record("input_rejected", tool="draft_issue", reason=bad_fields)
+        return {"status": "error", "error": bad_fields}
     req = load_requirement(requirement_id)
     if req["status"] != "success":
         return req
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    try:
-        drafts_dir = ISSUES_DIR / "drafts"
-        drafts_dir.mkdir(parents=True, exist_ok=True)
-        draft_path = drafts_dir / f"ISSUE-{requirement_id}-{stamp}.md"
+    drafts_dir = ISSUES_DIR / "drafts"
+    draft_path = drafts_dir / f"ISSUE-{requirement_id}-{stamp}.md"
 
-        quoted = "\n".join(f"> {line}" if line else ">" for line in req["text"].splitlines())
-        tests = "\n".join(f"- `{name}`" for name in failing_tests) or "- (none listed)"
+    quoted = "\n".join(f"> {line}" if line else ">" for line in req["text"].splitlines())
+    tests = "\n".join(f"- `{guardrails.single_line(str(name))}`" for name in failing_tests) or "- (none listed)"
+    try:
+        drafts_dir.mkdir(parents=True, exist_ok=True)
         draft_path.write_text(
-            f"# {title}\n\n"
+            f"# {guardrails.single_line(title)}\n\n"
             f"**Requirement:** {requirement_id} ({req['source_file']})\n\n"
             f"{quoted}\n\n"
             f"## Failing tests\n\n{tests}\n\n"
-            f"## Summary\n\n{summary}\n\n"
+            f"## Summary\n\n{guardrails.clean_text(summary)}\n\n"
             f"---\n_Drafted by Inspectra QA agent - not filed._\n",
             encoding="utf-8",
         )
-    except OSError as e:
-        return {"status": "error", "error": f"Could not write issue draft: {e}"}
+    except OSError:
+        return {"status": "error", "error": "Could not write the issue draft, action not completed."}
     return {"status": "success", "draft_path": str(draft_path)}
 
 

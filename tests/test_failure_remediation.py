@@ -117,13 +117,13 @@ def test_remediation_fail06_disk_write_failure_handled_gracefully(monkeypatch):
         with patch.object(Path, "write_text", side_effect=PermissionError("Permission denied")):
             res = qa_tools.propose_tests("REQ-2.1")
             assert res["status"] == "error"
-            assert "Could not write proposed test file" in res["error"]
+            assert "Could not save the proposed tests" in res["error"]
 
     # Draft issue file write failure
     with patch.object(Path, "write_text", side_effect=OSError("Disk full")):
         res = qa_tools.draft_issue("REQ-2.1", "Test Title", "Summary text", ["test_dummy"])
         assert res["status"] == "error"
-        assert "Could not write issue draft" in res["error"]
+        assert "Could not write the issue draft" in res["error"]
 
 
 # =====================================================================
