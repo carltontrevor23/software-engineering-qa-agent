@@ -47,7 +47,15 @@ def is_high_impact(tool_name: str) -> bool:
 # =====================================================================
 
 DEFAULT_SECRET = "qa-agent-approval-secret-key-2026"
-APPROVAL_SECRET_KEY = os.getenv("APPROVAL_SECRET_KEY", DEFAULT_SECRET)
+_env_secret = os.getenv("APPROVAL_SECRET_KEY")
+# Remediation (FAIL-07 / EV-42): Do not fall back to a predictable static secret.
+# If APPROVAL_SECRET_KEY is unset or explicitly set to the insecure default, generate an
+# unguessable ephemeral secret at process startup so offline/static token forgery is blocked.
+APPROVAL_SECRET_KEY = (
+    _env_secret
+    if (_env_secret and _env_secret != DEFAULT_SECRET)
+    else secrets.token_hex(32)
+)
 
 # In-memory store of consumed nonces to prevent token replay attacks
 _CONSUMED_NONCES: set[str] = set()

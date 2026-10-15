@@ -35,6 +35,10 @@ ALLOWED_IMPORTS = {
 BANNED_IMPORTS = {"subprocess", "socket", "shutil", "ctypes", "urllib", "http"}
 BANNED_BUILTINS = {"eval", "exec", "compile", "__import__"}
 BANNED_OS_CALLS = {"system", "popen", "remove", "unlink", "rmdir"}
+BANNED_MUTATING_CALLS = {
+    "write_text", "write_bytes", "unlink", "rmdir", "rename", "replace", "mkdir", "chmod",
+}
+BANNED_REQUESTS_CALLS = {"post", "put", "delete", "patch"}
 # Only these variables are copied into the test process; everything else (API keys,
 # tokens) is left behind.
 ENV_ALLOW_LIST = ("PATH", "SYSTEMROOT", "TEMP", "TMP")
@@ -67,14 +71,35 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
                     return False, f"Import of '{name}' is not on the allow-list."
         elif isinstance(node, ast.Name) and node.id in BANNED_BUILTINS:
             return False, f"Use of '{node.id}' is not allowed."
+        elif isinstance(node, ast.Attribute):
+            if (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            ):
+                attr = node.attr
+                if attr in BANNED_OS_CALLS or attr.startswith(("exec", "spawn")):
+                    return False, f"Use of 'os.{attr}' is not allowed."
+            elif (
+                isinstance(node.value, ast.Name)
+                and node.value.id == "requests"
+            ):
+                if node.attr in BANNED_REQUESTS_CALLS:
+                    return False, f"Use of 'requests.{node.attr}' is not allowed in generated tests."
+            if node.attr in BANNED_MUTATING_CALLS:
+                return False, f"Mutating call '{node.attr}' is not allowed in generated tests."
         elif (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "os"
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
         ):
-            attr = node.attr
-            if attr in BANNED_OS_CALLS or attr.startswith(("exec", "spawn")):
-                return False, f"Use of 'os.{attr}' is not allowed."
+            for arg in node.args[1:]:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if any(m in arg.value for m in ("w", "a", "x", "+")):
+                        return False, "Opening files in write or append mode is not allowed in generated tests."
+            for kw in node.keywords:
+                if kw.arg == "mode" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    if any(m in kw.value.value for m in ("w", "a", "x", "+")):
+                        return False, "Opening files in write or append mode is not allowed in generated tests."
     return True, "ok"
 
 
