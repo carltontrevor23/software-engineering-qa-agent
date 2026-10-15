@@ -22,6 +22,7 @@ from approval import (
 )
 import guardrails
 import workflow
+import tracer
 from memory import advisory, format_history, get_case_history, record_case
 
 # Versioned agent prompt (Week 5): the rules live in prompts/, not in code.
@@ -206,6 +207,7 @@ def _run_one_tool(tool_name: str, args: Dict[str, Any], requirement_id: Optional
         print(format_history(case_key, history))
         print(f"[ADVISORY] {advisory(history)} (advisory only - the decision is yours)")
         approved, token, message = request_human_approval(tool_name, args)
+        tracer.record_approval_event(tool_name, args, "APPROVED" if approved else "REJECTED")
         if not approved:
             return {"status": "approval_required", "error": message}
         args["approval_token"] = token               # signed, single-use
@@ -281,24 +283,58 @@ graph = builder.compile()
 STOPPED_MESSAGE = "Stopped: reached the maximum number of tool-call steps"
 
 
-def run(prompt: str) -> str:
-    """Sends one prompt through the graph and returns the model's final text answer."""
+def run(prompt: str, capture_trace: bool = True) -> str:
+    """Sends one prompt through the graph, records observability trace, and returns the model's final text answer."""
+    import time
+    from datetime import datetime, timezone
+
+    start_time = time.perf_counter()
+    start_utc = datetime.now(timezone.utc).isoformat()
     try:
         state = initial_state(prompt)
     except ValueError as e:
+        err_msg = str(e)
+        duration_s = time.perf_counter() - start_time
+        if capture_trace:
+            tracer.record_input_rejection_trace(
+                prompt=prompt,
+                error_message=err_msg,
+                start_utc=start_utc,
+                duration_s=duration_s,
+                model_name=MODEL_NAME,
+                prompt_version=PROMPT_VERSION,
+            )
         return f"[GUARDRAIL] Request rejected: {e}"
+
     result = graph.invoke(state)
+    duration_s = time.perf_counter() - start_time
     print(f"[stop_reason] {result.get('stop_reason')} (phase {result.get('phase')})")
+
+    final_answer = ""
     # Hop limit hit: the loop ended on a tool result instead of an AI reply.
     if not isinstance(result["messages"][-1], AIMessage):
-        return STOPPED_MESSAGE
-    final_replies = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
-    if not final_replies:
-        return ""
-    content = final_replies[-1].content
-    if isinstance(content, list):
-        return "".join(b.get("text", "") for b in content if isinstance(b, dict))
-    return content
+        final_answer = STOPPED_MESSAGE
+    else:
+        final_replies = [m for m in result["messages"] if isinstance(m, AIMessage) and m.content]
+        if final_replies:
+            content = final_replies[-1].content
+            if isinstance(content, list):
+                final_answer = "".join(b.get("text", "") for b in content if isinstance(b, dict))
+            else:
+                final_answer = str(content)
+
+    if capture_trace:
+        tracer.record_execution_trace(
+            prompt=prompt,
+            final_state=result,
+            final_answer=final_answer,
+            start_utc=start_utc,
+            duration_s=duration_s,
+            model_name=MODEL_NAME,
+            prompt_version=PROMPT_VERSION,
+        )
+
+    return final_answer
 
 
 if __name__ == "__main__":
