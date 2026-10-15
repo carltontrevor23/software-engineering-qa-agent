@@ -179,9 +179,12 @@ def propose_tests(requirement_id: str) -> Dict[str, Any]:
         1 for node in ast.walk(ast.parse(code))
         if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     )
-    sandbox.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    test_path = sandbox.GENERATED_DIR / f"test_{_file_slug(requirement_id)}_{secrets.token_hex(4)}.py"
-    test_path.write_text(code, encoding="utf-8")
+    try:
+        sandbox.GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+        test_path = sandbox.GENERATED_DIR / f"test_{_file_slug(requirement_id)}_{secrets.token_hex(4)}.py"
+        test_path.write_text(code, encoding="utf-8")
+    except OSError as e:
+        return {"status": "error", "error": f"Could not write proposed test file: {e}"}
     return {
         "status": "success",
         "requirement_id": requirement_id,
@@ -215,21 +218,24 @@ def draft_issue(
         return req
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    drafts_dir = ISSUES_DIR / "drafts"
-    drafts_dir.mkdir(parents=True, exist_ok=True)
-    draft_path = drafts_dir / f"ISSUE-{requirement_id}-{stamp}.md"
+    try:
+        drafts_dir = ISSUES_DIR / "drafts"
+        drafts_dir.mkdir(parents=True, exist_ok=True)
+        draft_path = drafts_dir / f"ISSUE-{requirement_id}-{stamp}.md"
 
-    quoted = "\n".join(f"> {line}" if line else ">" for line in req["text"].splitlines())
-    tests = "\n".join(f"- `{name}`" for name in failing_tests) or "- (none listed)"
-    draft_path.write_text(
-        f"# {title}\n\n"
-        f"**Requirement:** {requirement_id} ({req['source_file']})\n\n"
-        f"{quoted}\n\n"
-        f"## Failing tests\n\n{tests}\n\n"
-        f"## Summary\n\n{summary}\n\n"
-        f"---\n_Drafted by Inspectra QA agent - not filed._\n",
-        encoding="utf-8",
-    )
+        quoted = "\n".join(f"> {line}" if line else ">" for line in req["text"].splitlines())
+        tests = "\n".join(f"- `{name}`" for name in failing_tests) or "- (none listed)"
+        draft_path.write_text(
+            f"# {title}\n\n"
+            f"**Requirement:** {requirement_id} ({req['source_file']})\n\n"
+            f"{quoted}\n\n"
+            f"## Failing tests\n\n{tests}\n\n"
+            f"## Summary\n\n{summary}\n\n"
+            f"---\n_Drafted by Inspectra QA agent - not filed._\n",
+            encoding="utf-8",
+        )
+    except OSError as e:
+        return {"status": "error", "error": f"Could not write issue draft: {e}"}
     return {"status": "success", "draft_path": str(draft_path)}
 
 
