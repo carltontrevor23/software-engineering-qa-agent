@@ -140,7 +140,7 @@ AGENT_CONTRACT = {
 # STEP 1 — bind tools to the model.
 llm = ChatGoogleGenerativeAI(
     model=MODEL_NAME, 
-    google_api_key=API_KEY,
+    google_api_key=API_KEY or "offline-placeholder-key",
     timeout=60,
     max_retries=3,
     )
@@ -239,11 +239,16 @@ def execute_tools(state: AgentState) -> Dict[str, Any]:
             }
         elif name not in TOOLS_BY_NAME:
             result = {"status": "error", "error": f"Unknown tool '{name}'."}
+            wf["stop_reason"] = "tool_error"
+            guardrails.record("tool_call_blocked", tool=name, reason=result["error"])
         else:
             blocked = workflow.check_call(wf, name, args)   # phase guard + file pinning
             if blocked:
                 result = {"status": "error", "error": blocked}
+                wf["stop_reason"] = "tool_error"
+                guardrails.record("tool_call_blocked", tool=name, reason=blocked)
             else:
+                wf["stop_reason"] = None
                 result = _run_one_tool(name, args, requirement_id=wf["requirement_id"])
                 wf.update(workflow.apply_result(wf, name, result))
                 executed = True
@@ -306,7 +311,27 @@ def run(prompt: str, capture_trace: bool = True) -> str:
             )
         return f"[GUARDRAIL] Request rejected: {e}"
 
-    result = graph.invoke(state)
+    try:
+        result = graph.invoke(state)
+    except Exception as e:
+        duration_s = time.perf_counter() - start_time
+        safe_err, _ = guardrails.redact(str(e))
+        error_state = {**state, "phase": workflow.STOPPED, "stop_reason": "tool_error"}
+        final_answer = f"[ERROR] Model or graph execution failed: {safe_err}"
+        print(f"[stop_reason] tool_error (phase STOPPED)")
+        if capture_trace:
+            tracer.record_execution_trace(
+                prompt=prompt,
+                final_state=error_state,
+                final_answer=final_answer,
+                start_utc=start_utc,
+                duration_s=duration_s,
+                model_name=MODEL_NAME,
+                prompt_version=PROMPT_VERSION,
+                errors=[{"type": type(e).__name__, "error": safe_err}],
+            )
+        return final_answer
+
     duration_s = time.perf_counter() - start_time
     print(f"[stop_reason] {result.get('stop_reason')} (phase {result.get('phase')})")
 

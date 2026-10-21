@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover - optional dependency in some envs
 
 from google import genai
 from google.genai import errors as genai_errors
+import guardrails
 from rag import build_rag_pipeline
 
 
@@ -50,13 +51,9 @@ load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.8-flash")
 
-if not API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY not found. Create a .env file in the project "
-        "root with a line like: GEMINI_API_KEY=your_key_here"
-    )
-
-client = genai.Client(api_key=API_KEY)
+# Defer hard failure when GEMINI_API_KEY is absent so offline rehearsals (--offline)
+# and unit tests can import this module without requiring a live API key.
+client = genai.Client(api_key=API_KEY) if API_KEY else None
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRACES_DIR = PROJECT_ROOT / "evidence" / "traces"
@@ -113,6 +110,20 @@ def get_model_response(
         ModelCallError: if the call fails on every attempt.
     """
     import time
+
+    if not API_KEY or client is None:
+        msg = (
+            "GEMINI_API_KEY not found. Create a .env file in the project "
+            "root with a line like: GEMINI_API_KEY=your_key_here"
+        )
+        _log_call(
+            prompt=prompt,
+            prompt_version=prompt_version,
+            response=None,
+            status="failed",
+            error=msg,
+        )
+        raise ModelCallError(msg)
 
     last_error: Exception | None = None
 
@@ -193,15 +204,18 @@ def _log_call(
 ) -> None:
     """Append a record of this call (success or failure) to a dated trace file."""
     timestamp = datetime.now(timezone.utc).isoformat()
+    safe_prompt, _ = guardrails.redact(prompt) if prompt else (prompt, 0)
+    safe_response, _ = guardrails.redact(response) if response else (response, 0)
+    safe_error, _ = guardrails.redact(error) if error else (error, 0)
 
     record = {
         "timestamp_utc": timestamp,
         "model": MODEL_NAME,
         "prompt_version": prompt_version,
         "status": status,          # "success" or "failed"
-        "prompt": prompt,
-        "response": response,      # None if the call failed
-        "error": error,            # None if the call succeeded
+        "prompt": safe_prompt,
+        "response": safe_response,  # None if the call failed
+        "error": safe_error,        # None if the call succeeded
     }
 
     trace_file = TRACES_DIR / f"trace_{datetime.now(timezone.utc).date()}.jsonl"

@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from mcp.server.fastmcp import FastMCP
 
+import guardrails
 import qa_tools
 import tool_calling
 import workflow
@@ -38,21 +39,39 @@ mcp = FastMCP("inspectra-qa")
 _session: Dict[str, Any] = workflow.new_workflow()
 
 
+def _redact_payload(value: Any) -> Any:
+    """Recursively redact secrets in MCP tool responses."""
+    if isinstance(value, str):
+        redacted, count = guardrails.redact(value)
+        if count:
+            guardrails.record("secret_redacted", where="mcp_server", count=count)
+        return redacted
+    if isinstance(value, dict):
+        return {k: _redact_payload(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_payload(v) for v in value]
+    return value
+
+
 def _call(tool_name: str, args: Dict[str, Any]):
     blocked = workflow.check_call(_session, tool_name, args)
     if blocked:
+        guardrails.record("tool_call_blocked", tool=tool_name, reason=blocked)
         return {"status": "error", "error": blocked, "phase": _session["phase"]}
     result = tool_calling._run_one_tool(tool_name, dict(args), requirement_id=_session["requirement_id"])
     _session.update(workflow.apply_result(_session, tool_name, result))
     key = _session["requirement_id"] or qa_tools.requirement_id_from_args(args)
     tool_calling._record(key, tool_name, result, 0)
-    return {**result, "phase": _session["phase"]} if isinstance(result, dict) else result
+    payload = {**result, "phase": _session["phase"]} if isinstance(result, dict) else result
+    return _redact_payload(payload)
 
 
 def _refuse_client_token() -> Dict[str, Any]:
+    msg = "Client-supplied approval tokens are not accepted. Approval is minted server-side after human confirmation."
+    guardrails.record("client_token_refused", where="mcp_server")
     return {
         "status": "error",
-        "error": "Client-supplied approval tokens are not accepted. Approval is minted server-side after human confirmation.",
+        "error": msg,
         "phase": _session["phase"],
     }
 

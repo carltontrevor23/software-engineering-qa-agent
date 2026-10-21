@@ -38,7 +38,7 @@ BANNED_OS_CALLS = {"system", "popen", "remove", "unlink", "rmdir"}
 BANNED_MUTATING_CALLS = {
     "write_text", "write_bytes", "unlink", "rmdir", "rename", "replace", "mkdir", "chmod",
 }
-BANNED_REQUESTS_CALLS = {"post", "put", "delete", "patch"}
+BANNED_REQUESTS_CALLS = {"post", "put", "delete", "patch", "request", "Session", "session"}
 # Only these variables are copied into the test process; everything else (API keys,
 # tokens) is left behind.
 ENV_ALLOW_LIST = ("PATH", "SYSTEMROOT", "TEMP", "TMP")
@@ -69,6 +69,16 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
                     return False, f"Import of '{name}' is not allowed."
                 if root not in ALLOWED_IMPORTS:
                     return False, f"Import of '{name}' is not on the allow-list."
+            if isinstance(node, ast.ImportFrom):
+                root = _root_module(node.module or "")
+                for alias in node.names:
+                    imported = alias.name
+                    if root == "os" and (imported in BANNED_OS_CALLS or imported.startswith(("exec", "spawn"))):
+                        return False, f"Use of 'os.{imported}' is not allowed."
+                    if root == "requests" and imported in BANNED_REQUESTS_CALLS:
+                        return False, f"Use of 'requests.{imported}' is not allowed in generated tests."
+                    if imported in BANNED_MUTATING_CALLS:
+                        return False, f"Mutating call '{imported}' is not allowed in generated tests."
         elif isinstance(node, ast.Name) and node.id in BANNED_BUILTINS:
             return False, f"Use of '{node.id}' is not allowed."
         elif isinstance(node, ast.Attribute):
@@ -89,8 +99,10 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
                 return False, f"Mutating call '{node.attr}' is not allowed in generated tests."
         elif (
             isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "open"
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id == "open")
+                or (isinstance(node.func, ast.Attribute) and node.func.attr == "open")
+            )
         ):
             for arg in node.args[1:]:
                 if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
@@ -151,7 +163,7 @@ def _parse_junit(xml_path: Path) -> Dict[str, Any]:
                 message = problem.get("message") or (problem.text or "")
                 failures.append({"test_name": name, "message": _truncate(message)})
     return {
-        "passed": total - failed - errors - skipped,
+        "passed": max(0, total - failed - errors - skipped),
         "failed": failed,
         "errors": errors,
         "failures": failures,
@@ -198,11 +210,11 @@ def run_pytest(test_file: str) -> Dict[str, Any]:
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
-    # Exit code 5 means pytest collected no tests.
-    if proc.returncode == 5 or (counts["passed"] + counts["failed"] + counts["errors"]) == 0:
-        outcome = "no_tests"
-    elif counts["failed"] or counts["errors"]:
+    # Check failures/errors first so collection errors (tests=0, errors=1) report "failed".
+    if counts["failed"] or counts["errors"]:
         outcome = "failed"
+    elif proc.returncode == 5 or (counts["passed"] + counts["failed"] + counts["errors"]) == 0:
+        outcome = "no_tests"
     else:
         outcome = "passed"
     return {"status": "success", "test_outcome": outcome, **counts}
