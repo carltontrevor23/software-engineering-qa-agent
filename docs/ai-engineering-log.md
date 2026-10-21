@@ -94,3 +94,20 @@ and what a team member must review before the change is accepted.
   - the phase table in `workflow.py`;
   - the GitHub path against a real demo repository (it is only tested with mocked HTTP);
   - the realignment owner entry in `week-6-report.md`, which the team must fill in.
+
+---
+
+## 2026-10-21 — Week 8 final hardening: critical defect fixes and known limitations documentation
+
+- **Tool / model:** Antigravity AI coding assistant.
+- **Prompt given:** Fix critical defects before final presentation and document known limitations that remain, with evidence stored in `evidence/` (without adding new regression test functions).
+- **Generated / modified:**
+  - `src/tool_calling.py`: set `wf["stop_reason"] = "tool_error"` and record `tool_call_blocked` guardrail events when tool calls are refused by the allow-list or `workflow.check_call()` (resolving the EV-08/EV-18/EV-20/EV-41 stop-reason mislabelling defect); guard `graph.invoke(state)` in `run()` so live LLM failures after retries record an observability trace and return a clean `[ERROR]` message instead of an unhandled traceback; allow offline initialization when `GEMINI_API_KEY` is unset.
+  - `src/sandbox.py`: block `from os import ...` and `from requests import ...` banned call imports and `Path.open()` write/append modes in `validate_generated_code()`; clamp `passed = max(0, ...)` in `_parse_junit()` and prioritize `failed`/`errors` over `no_tests` in `run_pytest()` so pytest collection errors (`tests=0, errors=1`) are never misclassified as `no_tests`.
+  - `src/tracer.py`, `src/model_client.py`, `src/mcp_server.py`: apply `guardrails.redact()` across execution traces, model call logs, and MCP tool responses, and defer `GEMINI_API_KEY` enforcement in `model_client.py` from import time to `get_model_response()`.
+  - `src/guardrails.py`: validate `isinstance(failing_tests, (list, tuple))` in `check_draft_fields()` and reject boolean `top_k` values in `check_query()`.
+  - `tests/conftest.py`: redirect `tracer.DEFAULT_TRACE_FILE` to `tmp_path` so running `pytest` does not append test records to `evidence/traces/agent_traces.jsonl`.
+  - `README.md` & `evidence/week8_defect_fixes_and_known_limitations.md`: documented all 6 critical defect fixes and 7 remaining known limitations.
+- **Verified by the agent:** `python -m pytest tests/ sut/tests/ -v` passes (150 passed, 1 skipped) with a clean `git status` on `evidence/traces/agent_traces.jsonl`, and all 6 defect fixes verified via direct execution checks.
+- **A human must review:**
+  - `evidence/week8_defect_fixes_and_known_limitations.md` and the `Known Limitations` section in `README.md` prior to the final presentation.

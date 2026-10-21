@@ -32,6 +32,7 @@ from typing import Any, Deque, Dict, List, Optional
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+import guardrails
 
 logger = logging.getLogger("inspectra.observability")
 
@@ -47,9 +48,21 @@ TRACES: Deque[Dict[str, Any]] = deque(maxlen=500)
 _APPROVAL_EVENTS: List[Dict[str, Any]] = []
 
 
+def _redact_value(value: Any) -> Any:
+    """Recursively redact secrets and remove approval_token from traced values."""
+    if isinstance(value, str):
+        redacted, _ = guardrails.redact(value)
+        return redacted
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items() if k != "approval_token"}
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    return value
+
+
 def record_approval_event(tool_name: str, args: Dict[str, Any], decision: str) -> Dict[str, Any]:
     """Record one human approval decision (APPROVED / REJECTED) for high-impact actions."""
-    clean_args = {k: v for k, v in args.items() if k != "approval_token"}
+    clean_args = _redact_value({k: v for k, v in args.items() if k != "approval_token"})
     event = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "tool_name": tool_name,
@@ -146,10 +159,11 @@ def build_trace(
         "system_prompt_reference": f"prompts/agent_system_prompt_{prompt_version}.txt",
     }
 
-    # 2. Prompt evidence
+    # 2. Prompt evidence (redacted for secrets)
+    safe_prompt = _redact_value(prompt) if isinstance(prompt, str) else ""
     prompt_evidence = {
-        "user_prompt": prompt,
-        "clean_prompt": prompt.strip() if isinstance(prompt, str) else "",
+        "user_prompt": safe_prompt,
+        "clean_prompt": safe_prompt.strip() if isinstance(safe_prompt, str) else "",
         "char_count": len(prompt) if isinstance(prompt, str) else 0,
     }
 
@@ -158,7 +172,7 @@ def build_trace(
     tool_sequence: List[str] = []
     tool_calls_evidence: List[Dict[str, Any]] = []
     retrieval_evidence: List[Dict[str, Any]] = []
-    captured_errors: List[Dict[str, str]] = list(errors or [])
+    captured_errors: List[Dict[str, str]] = _redact_value(list(errors or []))
 
     # Map AI tool_calls to subsequent ToolMessages
     pending_calls: Dict[str, Dict[str, Any]] = {}
@@ -177,10 +191,10 @@ def build_trace(
             tc_id = getattr(msg, "tool_call_id", None)
             call_info = pending_calls.pop(tc_id, {"hop": hop_counter, "tool": msg.name, "args": {}})
             tool_name = msg.name or call_info.get("tool", "unknown")
-            tool_args = call_info.get("args", {})
+            tool_args = _redact_value(call_info.get("args", {}))
             parsed = _parse_payload(msg.content)
             status = parsed.get("status", "unknown") if isinstance(parsed, dict) else "unknown"
-            err_msg = parsed.get("error") if isinstance(parsed, dict) else None
+            err_msg = _redact_value(parsed.get("error")) if isinstance(parsed, dict) else None
 
             tool_sequence.append(tool_name)
             tool_record = {
@@ -190,7 +204,7 @@ def build_trace(
                 "status": status,
                 "error": err_msg,
                 "test_outcome": parsed.get("test_outcome") if isinstance(parsed, dict) else None,
-                "result_summary": _summarize_tool_result(tool_name, status, parsed),
+                "result_summary": _redact_value(_summarize_tool_result(tool_name, status, parsed)),
             }
             tool_calls_evidence.append(tool_record)
 
@@ -209,9 +223,11 @@ def build_trace(
                             "requirement_id": h.get("requirement_id"),
                             "source_file": h.get("source_file"),
                             "score": h.get("score"),
-                            "text_preview": (h.get("text", "")[:120] + "...")
-                            if len(h.get("text", "")) > 120
-                            else h.get("text", ""),
+                            "text_preview": _redact_value(
+                                (h.get("text", "")[:120] + "...")
+                                if len(h.get("text", "")) > 120
+                                else h.get("text", "")
+                            ),
                         }
                         for h in hits
                     ],
@@ -250,7 +266,7 @@ def build_trace(
                 break
 
     outcome_evidence = {
-        "final_answer": final_answer,
+        "final_answer": _redact_value(final_answer),
         "stop_reason": final_state.get("stop_reason", "unclassified"),
         "final_phase": final_state.get("phase", "START"),
         "requirement_id": final_state.get("requirement_id"),
@@ -334,6 +350,9 @@ def record_input_rejection_trace(
     """Capture an observability trace when a request is rejected by input guardrails."""
     end_utc = datetime.now(timezone.utc).isoformat()
     trace_id = f"trace-rejected-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    raw_prompt = str(prompt) if prompt is not None else ""
+    safe_prompt = _redact_value(raw_prompt)
+    safe_error = _redact_value(error_message)
 
     trace = {
         "trace_id": trace_id,
@@ -345,9 +364,9 @@ def record_input_rejection_trace(
             "system_prompt_reference": f"prompts/agent_system_prompt_{prompt_version}.txt",
         },
         "prompt": {
-            "user_prompt": str(prompt) if prompt is not None else "",
-            "clean_prompt": str(prompt).strip() if prompt is not None else "",
-            "char_count": len(str(prompt)) if prompt is not None else 0,
+            "user_prompt": safe_prompt,
+            "clean_prompt": safe_prompt.strip(),
+            "char_count": len(raw_prompt),
         },
         "retrieval": [],
         "tools": {
@@ -361,9 +380,9 @@ def record_input_rejection_trace(
             "total_latency_s": round(duration_s, 4),
             "total_hops": 0,
         },
-        "errors": [{"type": "input_validation_error", "error": error_message}],
+        "errors": [{"type": "input_validation_error", "error": safe_error}],
         "outcome": {
-            "final_answer": f"[GUARDRAIL] Request rejected: {error_message}",
+            "final_answer": f"[GUARDRAIL] Request rejected: {safe_error}",
             "stop_reason": "input_rejected",
             "final_phase": "START",
             "requirement_id": None,
@@ -376,7 +395,7 @@ def record_input_rejection_trace(
     with _LOCK:
         TRACES.append(trace)
 
-    logger.warning("Agent request rejected before model execution: %s", error_message)
+    logger.warning("Agent request rejected before model execution: %s", safe_error)
 
     target_file = filepath or DEFAULT_TRACE_FILE
     save_trace_to_file(trace, target_file)
@@ -393,4 +412,3 @@ def save_trace_to_file(trace: Dict[str, Any], filepath: Path) -> None:
                 f.write(json.dumps(trace) + "\n")
         except Exception as e:
             logger.error("Failed to write trace to %s: %s", filepath, e)
-

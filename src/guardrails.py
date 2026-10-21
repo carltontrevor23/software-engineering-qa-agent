@@ -77,7 +77,7 @@ def check_query(query: Any, top_k: Any) -> Optional[str]:
         return "Search query is empty."
     if len(query) > MAX_QUERY_CHARS:
         return f"Search query is longer than {MAX_QUERY_CHARS} characters."
-    if not isinstance(top_k, int) or not 1 <= top_k <= MAX_TOP_K:
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= MAX_TOP_K:
         return f"top_k must be between 1 and {MAX_TOP_K}."
     return None
 
@@ -91,6 +91,8 @@ def check_draft_fields(title: Any, summary: Any, failing_tests: Any) -> Optional
         return "Issue summary is empty."
     if len(summary) > MAX_SUMMARY_CHARS:
         return f"Issue summary is longer than {MAX_SUMMARY_CHARS} characters."
+    if not isinstance(failing_tests, (list, tuple)):
+        return "failing_tests must be a list of test names."
     if len(failing_tests) > MAX_FAILING_TESTS:
         return f"More than {MAX_FAILING_TESTS} failing tests listed."
     if any(len(str(name)) > MAX_TEST_NAME_CHARS for name in failing_tests):
