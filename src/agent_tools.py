@@ -1,9 +1,10 @@
 """
 src/agent_tools.py
 
-The six approved tools of the Inspectra agent (Week 4 contract; see docs/tools/tool_catalogue.md).
+The approved tools of the Inspectra agent (Week 4 contract plus the Week 8 follow-up tools
+read_code and refine_tests; see docs/tools/tool_catalogue.md).
 Thin LangChain wrappers: the implementations and their validation live in qa_tools.py.
-These six names are the tool allow-list.
+These names are the tool allow-list.
 """
 
 from __future__ import annotations
@@ -59,6 +60,22 @@ def save_test_to_suite(test_file: str, approval_token: Optional[str] = None) -> 
     return qa_tools.save_test_to_suite(test_file, approval_token)
 
 
+# Tool 7: read-only view of the code under test, for follow-up questions about the implementation.
+@tool
+def read_code(file: str = "") -> Dict[str, Any]:
+    """Read the code under test. With no file, list its source files; with a path such as
+    pkg/module.py, return that file's source. Read-only."""
+    return qa_tools.read_code(file)
+
+
+# Tool 8: writes a NEW generated test file from an earlier one, changed as the developer asks.
+@tool
+def refine_tests(requirement_id: str, test_file: str, instruction: str) -> Dict[str, Any]:
+    """Write a new test file from the previous test_file, changed as the user asked (for example
+    'add a test for a negative balance'). Then run it with run_tests."""
+    return qa_tools.refine_tests(requirement_id, test_file, instruction)
+
+
 TOOLS = [
     search_requirements,
     propose_tests,
@@ -66,5 +83,7 @@ TOOLS = [
     draft_issue,
     file_issue,
     save_test_to_suite,
+    read_code,
+    refine_tests,
 ]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}

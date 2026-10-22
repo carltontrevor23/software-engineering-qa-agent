@@ -58,17 +58,34 @@ Then open https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024 . (K
 the agent writes generated tests and issue drafts inside the project, and the file watcher would
 restart the server in the middle of a run.)
 
-Two graphs are served (see [`langgraph.json`](langgraph.json)):
+Three graphs are served (see [`langgraph.json`](langgraph.json)):
 
 | Graph | Model | Use it for |
 |---|---|---|
 | `inspectra_offline` | scripted, with fixture tests and a **planted bug** | rehearsals and the demo: no network, no quota |
+| `inspectra_offline_pass` | scripted, fixture tests, **no bug** (tests pass) | trying the follow-ups below offline |
 | `inspectra` | `INSPECTRA_MODEL` (Groq by default) | the live agent |
 
 Send a message such as `Check REQ-2.1 (Tier Upgrades) against the code.` The state panel shows the
 workflow fields (`phase`, `test_outcome`, `stop_reason`, ...) after every step. When the agent wants
 to file an issue it **pauses on an approve/reject card** (with the requirement's recent test runs
 and an advisory); approve to file it, reject to stop with `human_rejection`.
+
+### Follow-ups in the same thread
+
+After a run whose tests **passed** (or whose test was judged wrong), keep typing in the same thread
+without naming a requirement:
+
+| You type | The agent does |
+|---|---|
+| `Save those tests.` | pauses on an approve/reject card for `save_test_to_suite`; approve adds the file to the code folder's `tests/` |
+| `Add a test for a negative balance.` | `refine_tests` writes a **new** test file from the last one, then `run_tests` runs it |
+| `How does the code handle upgrades?` | `read_code` lists and reads source files (read-only, only inside the code folder), then answers from them |
+
+Naming a requirement (`Check REQ-2.1 again.`) always starts a fresh run. A follow-up can only act on
+the test file the previous run produced, saves always need human approval, and a thread allows at
+most 5 test versions. A run that filed an issue, was rejected or stopped on an error is not continued.
+Use a **new thread** (+) for each separate demo.
 
 ## Running the agent on the command line
 

@@ -36,6 +36,10 @@ ISSUES_DIR = PROJECT_ROOT / "evidence" / "issues"
 PROMPT_TEMPLATE = PROJECT_ROOT / "prompts" / "v1.1_test_proposal.txt"
 PROMPT_ADDENDUM = PROJECT_ROOT / "prompts" / "v1.1_pytest_output_addendum.txt"
 PROMPT_VERSION = "v1.1+pytest-addendum-v1"
+REFINE_TEMPLATE = PROJECT_ROOT / "prompts" / "v1.2_refine_tests.txt"
+REFINE_PROMPT_VERSION = "v1.2-refine+pytest-addendum-v1"
+MAX_READ_CHARS = 20_000
+MAX_REFINE_INPUT_CHARS = 20_000
 # GitHub Issues integration for file_issue; used only when GITHUB_TOKEN and GITHUB_REPO are set.
 GITHUB_API = "https://api.github.com/repos/{repo}/issues"
 GITHUB_LABELS = ["inspectra-qa"]
@@ -164,35 +168,21 @@ def _sut_module_description() -> tuple:
     return project_config.module_description(Path(sandbox.SUT_DIR))
 
 
-def propose_tests(requirement_id: str) -> Dict[str, Any]:
-    """Ask the model for pytest tests for one requirement and save them to the sandbox."""
-    invalid = _invalid_requirement_id("propose_tests", requirement_id)
-    if invalid:
-        return invalid
-    req = load_requirement(requirement_id)
-    if req["status"] != "success":
-        return req
+def _prompt_context(req: Dict[str, Any]) -> tuple:
+    """((module text, addendum rules), None) for the configured project, or (None, error dict)."""
     try:
         module_text, first_module = _sut_module_description()
     except (project_config.ProjectConfigError, OSError) as e:
-        return {"status": "error", "error": f"The code under test cannot be read: {e}"}
-
-    prompt = build_test_proposal_prompt(
-        template_path=str(PROMPT_TEMPLATE),
-        module_description=module_text,
-        requirements_excerpt=f"Source: {req['source_file']}\n{req['text']}",
-    )
+        return None, {"status": "error", "error": f"The code under test cannot be read: {e}"}
     addendum = PROMPT_ADDENDUM.read_text(encoding="utf-8")
     addendum = addendum.replace("{{first_module}}", first_module).replace(
         "{{packages}}", ", ".join(sorted(project_config.top_level_packages(Path(sandbox.SUT_DIR))))
     )
-    prompt += "\n\n" + addendum
+    return (module_text, addendum), None
 
-    try:
-        reply = get_model_response(prompt, prompt_version=PROMPT_VERSION)
-    except ModelCallError as e:
-        return {"status": "error", "error": f"Model unavailable, no tests proposed: {e}"}
 
+def _save_generated_tests(requirement_id: str, reply: str) -> Dict[str, Any]:
+    """Validate a model reply that should hold one python block and save it as a new test file."""
     if reply.strip().startswith("NO_GROUNDED_TESTS_FOUND"):
         return {"status": "error", "error": reply.strip()[:500]}
     match = _CODE_BLOCK_RE.search(reply)
@@ -219,6 +209,109 @@ def propose_tests(requirement_id: str) -> Dict[str, Any]:
         "requirement_id": requirement_id,
         "test_file": str(test_path),
         "test_count": test_count,
+    }
+
+
+def propose_tests(requirement_id: str) -> Dict[str, Any]:
+    """Ask the model for pytest tests for one requirement and save them to the sandbox."""
+    invalid = _invalid_requirement_id("propose_tests", requirement_id)
+    if invalid:
+        return invalid
+    req = load_requirement(requirement_id)
+    if req["status"] != "success":
+        return req
+    context, error = _prompt_context(req)
+    if error:
+        return error
+    module_text, addendum = context
+
+    prompt = build_test_proposal_prompt(
+        template_path=str(PROMPT_TEMPLATE),
+        module_description=module_text,
+        requirements_excerpt=f"Source: {req['source_file']}\n{req['text']}",
+    )
+    prompt += "\n\n" + addendum
+    try:
+        reply = get_model_response(prompt, prompt_version=PROMPT_VERSION)
+    except ModelCallError as e:
+        return {"status": "error", "error": f"Model unavailable, no tests proposed: {e}"}
+    return _save_generated_tests(requirement_id, reply)
+
+
+def refine_tests(requirement_id: str, test_file: str, instruction: str) -> Dict[str, Any]:
+    """Write a NEW test file: the given generated tests changed as the developer asks."""
+    invalid = _invalid_requirement_id("refine_tests", requirement_id)
+    if invalid:
+        return invalid
+    bad = guardrails.check_instruction(instruction)
+    if bad:
+        guardrails.record("input_rejected", tool="refine_tests", reason=bad)
+        return {"status": "error", "error": bad}
+    ok, resolved = sandbox.resolve_test_path(test_file)
+    if not ok:
+        return {"status": "error", "error": resolved}
+    if not resolved.is_relative_to(Path(sandbox.GENERATED_DIR).resolve()):
+        return {"status": "error", "error": "Only generated tests can be refined."}
+    existing = resolved.read_text(encoding="utf-8")
+    if len(existing) > MAX_REFINE_INPUT_CHARS:
+        return {"status": "error", "error": "The existing tests are too long to refine."}
+    req = load_requirement(requirement_id)
+    if req["status"] != "success":
+        return req
+    context, error = _prompt_context(req)
+    if error:
+        return error
+    module_text, addendum = context
+
+    prompt = REFINE_TEMPLATE.read_text(encoding="utf-8")
+    for key, value in (
+        ("{{module_description}}", module_text),
+        ("{{requirements_excerpt}}", f"Source: {req['source_file']}\n{req['text']}"),
+        ("{{existing_tests}}", existing),
+        ("{{instruction}}", guardrails.clean_text(instruction).strip()),
+    ):
+        prompt = prompt.replace(key, value)
+    prompt += "\n\n" + addendum
+    try:
+        reply = get_model_response(prompt, prompt_version=REFINE_PROMPT_VERSION)
+    except ModelCallError as e:
+        return {"status": "error", "error": f"Model unavailable, no tests written: {e}"}
+    result = _save_generated_tests(requirement_id, reply)
+    if result["status"] == "success":
+        result["refined_from"] = resolved.name
+    return result
+
+
+_HIDDEN_PARTS = {".git", "venv", ".venv", "site-packages", "__pycache__", "node_modules"}
+
+
+def read_code(file: str = "") -> Dict[str, Any]:
+    """Read-only: list the code under test, or return one source file from it."""
+    directory = Path(sandbox.SUT_DIR).resolve()
+    if not file:
+        try:
+            modules = project_config.code_modules(directory)
+        except project_config.ProjectConfigError as e:
+            return {"status": "error", "error": str(e)}
+        return {"status": "success", "files": [m.as_posix() for m in modules]}
+    if not isinstance(file, str) or len(file) > 200:
+        return {"status": "error", "error": "file must be a short relative path such as pkg/module.py."}
+    target = (directory / file).resolve()
+    inside = target.is_relative_to(directory)
+    relative_parts = target.relative_to(directory).parts if inside else ()
+    if (not inside or target.suffix != ".py" or not target.is_file()
+            or any(part in _HIDDEN_PARTS or part.startswith(".") for part in relative_parts)):
+        guardrails.record("input_rejected", tool="read_code", reason="path outside the readable code")
+        return {"status": "error", "error": "Only .py files inside the code under test can be read."}
+    try:
+        text = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return {"status": "error", "error": "That file could not be read."}
+    return {
+        "status": "success",
+        "file": target.relative_to(directory).as_posix(),
+        "content": text[:MAX_READ_CHARS],
+        "truncated": len(text) > MAX_READ_CHARS,
     }
 
 

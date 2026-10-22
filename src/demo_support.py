@@ -118,12 +118,42 @@ class ScriptedLLM:
     def _answer(text: str) -> AIMessage:
         return AIMessage(content=f"{SCRIPTED_LABEL} {text}")
 
+    @staticmethod
+    def _earlier_test_file(earlier: List[Any]) -> Optional[Dict[str, Any]]:
+        """The latest propose_tests/refine_tests result of a previous turn."""
+        for message in reversed(earlier):
+            if isinstance(message, ToolMessage) and message.name in ("propose_tests", "refine_tests"):
+                result = _parse_result(message.content)
+                if result.get("test_file"):
+                    return result
+        return None
+
+    def _follow_up(self, request_text: str, earlier: List[Any]) -> Optional[AIMessage]:
+        """A message that names no requirement, after an earlier run in the same thread."""
+        previous = self._earlier_test_file(earlier)
+        if previous is None or re.search(r"REQ-\d", request_text, re.I):
+            return None
+        lowered = request_text.lower()
+        if "save" in lowered:
+            return self._tool_call("save_test_to_suite", {"test_file": previous["test_file"]})
+        if re.search(r"\b(add|refine|change|more|another|extend)\b", lowered):
+            return self._tool_call("refine_tests", {
+                "requirement_id": previous["requirement_id"], "test_file": previous["test_file"],
+                "instruction": request_text,
+            })
+        return self._tool_call("read_code", {})
+
     def invoke(self, messages: List[Any]) -> AIMessage:
-        request = next((m for m in messages if isinstance(m, HumanMessage)), None)
+        last_human = max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=None)
+        request = messages[last_human] if last_human is not None else None
         request_text = str(request.content) if request else ""
-        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        this_turn = messages[last_human + 1:] if last_human is not None else messages
+        tool_messages = [m for m in this_turn if isinstance(m, ToolMessage)]
 
         if not tool_messages:
+            follow_up = self._follow_up(request_text, messages[: last_human or 0])
+            if follow_up is not None:
+                return follow_up
             return self._tool_call("search_requirements", {"query": request_text})
 
         last = tool_messages[-1]
@@ -143,10 +173,26 @@ class ScriptedLLM:
                 return self._answer("No matching requirement was found, so no tests were proposed.")
             return self._tool_call("propose_tests", {"requirement_id": requirement_id})
 
-        if last.name == "propose_tests":
+        if last.name in ("propose_tests", "refine_tests"):
             return self._tool_call("run_tests", {
                 "requirement_id": result["requirement_id"], "test_file": result["test_file"],
             })
+
+        if last.name == "save_test_to_suite":
+            return self._answer(f"Approved and saved the tests to {result.get('saved_path')}.")
+
+        if last.name == "read_code":
+            if result.get("files") is not None:
+                files = result["files"]
+                if not files:
+                    return self._answer("The code folder has no source files to read.")
+                return self._tool_call("read_code", {"file": files[0]})
+            try:
+                names = [n.name for n in ast.parse(result.get("content", "")).body
+                         if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and not n.name.startswith("_")]
+            except SyntaxError:
+                names = []
+            return self._answer(f"I read {result.get('file')}. It defines: {', '.join(names) or 'no public names'}.")
 
         if last.name == "run_tests":
             requirement_id = result.get("requirement_id", "unknown")

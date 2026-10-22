@@ -1,7 +1,8 @@
 {
   "graphs": {
     "inspectra": "./studio/graph.py:make_graph",
-    "inspectra_offline": "./studio/graph.py:make_offline_graph"
+    "inspectra_offline": "./studio/graph.py:make_offline_graph",
+    "inspectra_offline_pass": "./studio/graph.py:make_offline_pass_graph"
   },
   "env": "./.env",
   "python_version": "3.13",

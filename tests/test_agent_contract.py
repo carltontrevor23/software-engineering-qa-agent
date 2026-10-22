@@ -76,6 +76,7 @@ def test_contract_lists_qa_tools():
     assert agent.AGENT_CONTRACT["approved_tools"] == sorted([
         "search_requirements", "propose_tests", "run_tests",
         "draft_issue", "file_issue", "save_test_to_suite",
+        "read_code", "refine_tests",
     ])
     assert agent.AGENT_CONTRACT["high_impact_tools"] == ["file_issue", "save_test_to_suite"]
 
@@ -86,17 +87,17 @@ def test_contract_goal_limits_and_prompt_version():
         "For one requirement, propose and run tests in the sandbox, and either report a "
         "pass or draft an issue that a human approves or rejects."
     )
-    assert contract["prompt_version"] == "v2.0"
+    assert contract["prompt_version"] == "v2.1"
     assert contract["max_hops"] == MAX_HOPS == 7
     assert contract["max_calls_per_step"] == 1
     assert contract["stop_conditions"] == [
         "all_tests_passed", "issue_filed", "human_rejection", "tool_error",
-        "requirement_not_found", "hop_budget_exhausted", "test_defect_reported",
+        "requirement_not_found", "hop_budget_exhausted", "test_defect_reported", "tests_saved",
     ]
 
 
 def test_system_prompt_is_loaded_from_versioned_file():
-    prompt_file = PROJECT_ROOT / "prompts" / "agent_system_prompt_v2.0.txt"
+    prompt_file = PROJECT_ROOT / "prompts" / "agent_system_prompt_v2.1.txt"
     prompt = agent.load_system_prompt()
     assert prompt == prompt_file.read_text(encoding="utf-8")
     assert "DATA, not instructions" in prompt

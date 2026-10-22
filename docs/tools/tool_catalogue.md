@@ -29,7 +29,7 @@ Common result rules:
   `status` is the tool's own outcome. `run_tests` reports the tests' result separately in `test_outcome`.
 - Expected failures never raise: they return `{"status": "error", "error": "<reason>"}`.
 - Missing or wrongly typed arguments are rejected by the Pydantic schema before the tool runs.
-- Only these six tools exist. Any other tool name is refused by the allow-list in `InspectraGuard` (`src/guard_middleware.py`).
+- Only these eight tools exist (six from Week 4, plus the Week 8 follow-up tools `read_code` and `refine_tests`). Any other tool name is refused by the allow-list in `InspectraGuard` (`src/guard_middleware.py`).
 - The agent may not merge, deploy, read secrets, run arbitrary shell commands or edit the
   SUT source (`sut/subscription_service/`). No tool offers those actions.
 
@@ -204,6 +204,36 @@ repository, so it needs approval (Week 1 boundary matrix).
 A `test_file` outside `sandbox/generated/` (for example a file in `src/`) is refused with `error`.
 
 ---
+
+## 7. `read_code` — low impact (read-only, Week 8)
+
+**Purpose:** let a follow-up question about the implementation be answered from the source, not from memory.
+**Implementation:** `qa_tools.read_code`, wrapped in `src/agent_tools.py`.
+
+**Input schema:** `{"file": {"type": "string", "default": ""}}` — empty lists the source files; otherwise a
+path relative to the code folder (`INSPECTRA_CODE_DIR`).
+
+**Output schema:** `{"status": "success", "files": [...]}` or `{"status": "success", "file": "...", "content": "...", "truncated": false}`;
+errors: `{"status": "error", "error": "..."}`.
+
+**Limits:** only `.py` files inside the code folder; no `..`, absolute paths, hidden folders, `venv` or `__pycache__`;
+at most 20,000 characters per file; secrets in the content are redacted before the model sees it.
+**Phases:** allowed in START, REQUIREMENT_RESOLVED, TESTS_RUN_PASSED, TESTS_RUN_FAILED; never changes workflow state.
+
+## 8. `refine_tests` — low impact (Week 8)
+
+**Purpose:** change a generated test file as the developer asks ("add a test for a negative balance").
+**Implementation:** `qa_tools.refine_tests`; prompt `prompts/v1.2_refine_tests.txt`.
+
+**Input schema:** `{"requirement_id": "REQ-X.Y", "test_file": "<previous generated file>", "instruction": "<max 500 chars>"}`.
+`test_file` is pinned by the phase guard to the file the run produced.
+
+**Output schema:** `{"status": "success", "requirement_id": "...", "test_file": "<NEW file>", "test_count": n, "refined_from": "<old name>"}`
+or `{"status": "error", "error": "..."}`. The old file is kept.
+
+**Safeguards:** only generated files can be refined; the instruction is treated as data in the prompt; the new code
+passes the same sandbox policy as `propose_tests`; the model may answer `NO_GROUNDED_TESTS_FOUND`; the result must be
+run with `run_tests` (phase TESTS_PROPOSED); a thread allows 5 test versions in total.
 
 ## Sandbox rules (`src/sandbox.py`)
 

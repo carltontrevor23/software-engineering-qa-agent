@@ -189,7 +189,10 @@ class InspectraGuard(AgentMiddleware[InspectraState]):
     def before_agent(self, state: InspectraState, runtime: Any) -> Optional[Dict[str, Any]]:
         last = _last_message(state.get("messages", []), HumanMessage)
         text = _text(last.content) if last else ""
-        fresh = {**workflow.new_workflow(), "hops": 0}
+        # A follow-up ("save those tests", "add a test for X") continues a finished run;
+        # any other message starts fresh. The human still approves every save.
+        carried = workflow.carry_over(state, text)
+        fresh = {**(carried or workflow.new_workflow()), "hops": 0}
         ok, reason = guardrails.validate_request(text)
         if not ok:
             guardrails.record("input_rejected", tool="request", reason=reason)

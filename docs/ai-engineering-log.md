@@ -104,3 +104,10 @@ and what a team member must review before the change is accepted.
 - **What stayed deterministic:** phase machine, file pinning, hop budget (7), one tool call per step, secret redaction, unbacked-claim check. They now run as `InspectraGuard` middleware; human approval is `HumanInTheLoopMiddleware` (approve or reject only).
 - **Checked by a human:** offline graph approve and reject paths on a real `langgraph dev` server; the full test suite; one live Gemini run (REQ-2.1, tests passed).
 - **Not yet done:** Groq path untested (no key); sandbox hardening; 42-scenario re-run on the new graph.
+
+### Week 8 addendum - configurable project and follow-ups (2026-10-22)
+
+- **Task:** make the agent work on any project (paths as operator settings) and allow follow-up turns.
+- **AI use:** Claude Code added `src/project_config.py` (INSPECTRA_REQUIREMENTS_DIR, INSPECTRA_CODE_DIR, INSPECTRA_CODE_MODULES), the `read_code` and `refine_tests` tools, `workflow.carry_over()` for follow-ups, prompt v2.1 and `prompts/v1.2_refine_tests.txt`, the offline graph `inspectra_offline_pass`, and a Groq key pattern in the redaction list.
+- **Design choices a human should review:** a follow-up continues only after a passed run (or a test judged wrong) and only if the message names no requirement; saves still need human approval; read_code is limited to `.py` files inside the code folder.
+- **Tested:** 192 tests pass (`tests/test_project_config.py`, `tests/test_followups.py`). Not yet tested live: follow-ups with Groq or Gemini, and the second sample project (a Gemini 503 and a DNS failure interrupted those runs).
