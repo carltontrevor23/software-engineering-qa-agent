@@ -94,3 +94,13 @@ and what a team member must review before the change is accepted.
   - the phase table in `workflow.py`;
   - the GitHub path against a real demo repository (it is only tested with mocked HTTP);
   - the realignment owner entry in `week-6-report.md`, which the team must fill in.
+
+## Week 8 - Move to create_agent, middleware and LangGraph Studio (2026-10-22)
+
+- **Task:** Restructure the agent into the idiom taught in the AI engineering course so it runs and can be tested in LangGraph Studio.
+- **AI use:** Claude Code did the migration from `skills.md` / `skills/studio-migration`. Files changed or added:
+  - `src/agent.py`, `src/agent_state.py`, `src/agent_tools.py`, `src/guard_middleware.py`, `src/models.py`, `src/offline.py`, `src/tool_runner.py`, `studio/graph.py`, `langgraph.json`
+  - removed `src/tool_calling.py` and `src/capture_week5_traces.py` (replaced by `src/capture_traces.py`)
+- **What stayed deterministic:** phase machine, file pinning, hop budget (7), one tool call per step, secret redaction, unbacked-claim check. They now run as `InspectraGuard` middleware; human approval is `HumanInTheLoopMiddleware` (approve or reject only).
+- **Checked by a human:** offline graph approve and reject paths on a real `langgraph dev` server; the full test suite; one live Gemini run (REQ-2.1, tests passed).
+- **Not yet done:** Groq path untested (no key); sandbox hardening; 42-scenario re-run on the new graph.

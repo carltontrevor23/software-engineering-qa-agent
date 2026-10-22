@@ -1,7 +1,7 @@
 # State Model — Week 6 (realigned)
 
 **Project:** Software-Engineering QA Agent (Inspectra)
-**Code:** `AgentState` and `initial_state()` in [`src/tool_calling.py`](../../src/tool_calling.py); the phase
+**Code:** `InspectraState` in [`src/agent_state.py`](../../src/agent_state.py) (extends LangChain's `AgentState`); updated by the middleware in [`src/guard_middleware.py`](../../src/guard_middleware.py); the phase
 machine in [`src/workflow.py`](../../src/workflow.py); persistent memory in [`src/memory.py`](../../src/memory.py)
 **Tests:** [`tests/test_agent_contract.py`](../../tests/test_agent_contract.py), [`tests/test_mcp_server.py`](../../tests/test_mcp_server.py)
 
@@ -25,15 +25,15 @@ Nothing from memory is copied into `AgentState`, and `AgentState` has no field f
 
 | Field | Type | Written by | When | Read by |
 |---|---|---|---|---|
-| `messages` | list of messages | `assistant()` appends the model reply; `execute_tools()` appends one `ToolMessage` per call | Every step | `assistant()` (sent to the model); `run()` |
-| `hops` | int | `execute_tools()` | +1 per tool step | `route_after_tools()` (stops at `MAX_HOPS = 7`) |
-| `requirement_id` | str or None | `execute_tools()` via `workflow.apply_result` | After a successful `search_requirements` (top hit) or `propose_tests` | Case-history key; the approval display |
-| `phase` | str | `execute_tools()`; `assistant()` on the final answer | After every executed tool; at the end | `workflow.check_call()` (phase guard) |
-| `test_file` | str or None | `execute_tools()` | After `propose_tests` succeeds | Pins `run_tests` / `save_test_to_suite` to this file |
-| `test_outcome` | str or None | `execute_tools()` | After `run_tests` (`passed` / `failed` / `no_tests`) | Phase transition; final report |
-| `draft_path` | str or None | `execute_tools()` | After `draft_issue` succeeds | Pins `file_issue` to this draft |
-| `stop_reason` | str or None | `execute_tools()`, or `assistant()` on the final answer | When the run reaches a stop condition | `run()` and `demo/run_demo.py` print it |
-| `proposals_made` | int | `execute_tools()` | +1 per successful `propose_tests` | Allows exactly one regenerate after a failed run |
+| `messages` | list of messages | the model node appends the reply; the tools node appends one `ToolMessage` per call | Every step | the model; `agent.final_text()` |
+| `hops` | int | `wrap_tool_call` | +1 per tool step | `before_model` (stops at `MAX_HOPS = 7`) |
+| `requirement_id` | str or None | `wrap_tool_call` via `workflow.apply_result` | After a successful `search_requirements` (top hit) or `propose_tests` | Case-history key; the approval display |
+| `phase` | str | `wrap_tool_call`; `after_model` on the final answer | After every executed tool; at the end | `workflow.check_call()` (phase guard) |
+| `test_file` | str or None | `wrap_tool_call` | After `propose_tests` succeeds | Pins `run_tests` / `save_test_to_suite` to this file |
+| `test_outcome` | str or None | `wrap_tool_call` | After `run_tests` (`passed` / `failed` / `no_tests`) | Phase transition; final report |
+| `draft_path` | str or None | `wrap_tool_call` | After `draft_issue` succeeds | Pins `file_issue` to this draft |
+| `stop_reason` | str or None | `wrap_tool_call` / `before_model`, or `after_model` on the final answer | When the run reaches a stop condition | `agent.run()` and `demo/run_demo.py` print it |
+| `proposals_made` | int | `wrap_tool_call` | +1 per successful `propose_tests` | Allows exactly one regenerate after a failed run |
 
 All workflow fields are set **from tool results, never from the model's text**. The model can
 only ask for a tool; `workflow.apply_result()` decides what the result means for the state.
@@ -98,9 +98,9 @@ requirement or test output, cannot point them at another file
 
 ## 5. Lifecycle
 
-- **Created:** `initial_state(prompt)` sets `messages = [request]`, `hops = 0`, `phase = START`, the
-  other fields to `None` and `proposals_made = 0`. Nothing is loaded from earlier runs.
-- **Updated:** `execute_tools()` returns the changed fields after each step, and `assistant()`
+- **Created:** `InspectraGuard.before_agent` sets `hops = 0`, `phase = START`, the
+  other fields to `None` and `proposals_made = 0` at the start of every run. Nothing is loaded from earlier runs.
+- **Updated:** `wrap_tool_call` returns the changed fields after each step, and `after_model`
   closes the run when the model gives its final answer.
 - **Discarded:** when the run ends. Only the per-call metadata in `memory.py` outlives it.
 - **MCP server:** keeps the same workflow fields per server session (`start_check` resets them), so

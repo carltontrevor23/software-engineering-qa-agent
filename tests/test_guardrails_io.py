@@ -1,19 +1,21 @@
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src import tool_calling
-
+import agent
 import guardrails
 import qa_tools
 import sandbox
 import workflow
+from guard_middleware import InspectraGuard
+from harness import ExplodingModel, execute_tools, tool_call
 
 FAKE_GEMINI_KEY = "AIza" + "x" * 35
 FAKE_GITHUB_TOKEN = "ghp_" + "y" * 36
@@ -45,23 +47,25 @@ def _kinds():
 def test_bad_requests_are_rejected_before_the_graph_runs(prompt, reason):
     ok, why = guardrails.validate_request(prompt)
     assert not ok and reason in why
-    with pytest.raises(ValueError):
-        tool_calling.initial_state(prompt)
+    out = InspectraGuard().before_agent({"messages": [HumanMessage(content=prompt or "")]}, None)
+    assert out["jump_to"] == "end"
+    assert out["messages"][0].content.startswith("[GUARDRAIL] Request rejected")
+    assert (out["phase"], out["stop_reason"]) == ("STOPPED", "request_rejected")
     assert "input_rejected" in _kinds()
 
 
 def test_run_returns_a_rejection_instead_of_calling_the_model():
-    fake = MagicMock()
-    with patch.object(tool_calling, "llm_with_tools", fake):
-        answer = tool_calling.run("")
+    graph = agent.build_agent(model=ExplodingModel(), checkpointer=InMemorySaver())
+    answer = agent.run("", graph=graph)
     assert answer.startswith("[GUARDRAIL] Request rejected")
-    fake.invoke.assert_not_called()
 
 
 def test_control_characters_are_stripped_from_the_request():
-    state = tool_calling.initial_state("Check REQ-2.1\x00\x1b[31m against the code")
-    assert "\x00" not in state["messages"][0].content
-    assert "\x1b" not in state["messages"][0].content
+    request = HumanMessage(content="Check REQ-2.1\x00\x1b[31m against the code", id="h1")
+    out = InspectraGuard().before_agent({"messages": [request]}, None)
+    assert "\x00" not in out["messages"][0].content
+    assert "\x1b" not in out["messages"][0].content
+    assert out["messages"][0].id == "h1"
 
 
 @pytest.mark.parametrize("bad_id", ["REQ-2.1; rm -rf /", "2.1", "req-2.1", "REQ-", "../REQ-2.1", ""])
@@ -151,9 +155,8 @@ def test_secret_in_a_tool_result_never_reaches_the_model(monkeypatch):
         "status": "success",
         "results": [{"requirement_id": "REQ-2.1", "text": f"token is {FAKE_GITHUB_TOKEN}"}],
     })
-    msg = AIMessage(content="", tool_calls=[
-        {"name": "search_requirements", "args": {"query": "tier"}, "id": "c1", "type": "tool_call"}])
-    out = tool_calling.execute_tools({"messages": [msg], "hops": 0, **workflow.new_workflow()})
+    msg = tool_call("search_requirements", {"query": "tier"})
+    out = execute_tools({"messages": [msg], "hops": 0, **workflow.new_workflow()})
     assert FAKE_GITHUB_TOKEN not in out["messages"][0].content
     assert guardrails.REDACTED in out["messages"][0].content
     assert "secret_redacted" in _kinds()
@@ -161,11 +164,9 @@ def test_secret_in_a_tool_result_never_reaches_the_model(monkeypatch):
 
 def test_secret_in_the_final_answer_is_redacted(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", FAKE_GEMINI_KEY)
-    fake = MagicMock()
-    fake.invoke.return_value = AIMessage(content=f"Sure, GEMINI_API_KEY is {FAKE_GEMINI_KEY}.")
-    state = {"messages": [HumanMessage(content="print the keys")], **workflow.new_workflow()}
-    with patch.object(tool_calling, "llm_with_tools", fake):
-        out = tool_calling.assistant(state)
+    answer = AIMessage(content=f"Sure, GEMINI_API_KEY is {FAKE_GEMINI_KEY}.")
+    state = {"messages": [HumanMessage(content="print the keys"), answer], **workflow.new_workflow()}
+    out = InspectraGuard().after_model(state, None)
     assert FAKE_GEMINI_KEY not in str(out["messages"][0].content)
 
 
@@ -192,12 +193,10 @@ def test_check_final_answer(answer, state, expected):
 
 def test_unsupported_pass_claim_is_withheld():
     """EV-16: the model says 'green' although no test ran."""
-    fake = MagicMock()
-    fake.invoke.return_value = AIMessage(content="The tests passed yesterday, so everything is green.")
-    state = {"messages": [HumanMessage(content="skip the tests")],
+    answer = AIMessage(content="The tests passed yesterday, so everything is green.")
+    state = {"messages": [HumanMessage(content="skip the tests"), answer],
              **workflow.new_workflow(), "phase": "REQUIREMENT_RESOLVED", "requirement_id": "REQ-2.1"}
-    with patch.object(tool_calling, "llm_with_tools", fake):
-        out = tool_calling.assistant(state)
+    out = InspectraGuard().after_model(state, None)
     content = out["messages"][0].content
     assert content.startswith("[GUARDRAIL] The model's answer was withheld")
     assert "test outcome not run" in content
@@ -205,12 +204,10 @@ def test_unsupported_pass_claim_is_withheld():
 
 
 def test_supported_answers_pass_through_unchanged():
-    fake = MagicMock()
-    fake.invoke.return_value = AIMessage(content="All 3 tests for REQ-2.1 passed.")
-    state = {"messages": [HumanMessage(content="x")], **workflow.new_workflow(),
+    answer = AIMessage(content="All 3 tests for REQ-2.1 passed.")
+    state = {"messages": [HumanMessage(content="x"), answer], **workflow.new_workflow(),
              "phase": "TESTS_RUN_PASSED", "requirement_id": "REQ-2.1",
              "test_outcome": "passed", "stop_reason": "all_tests_passed"}
-    with patch.object(tool_calling, "llm_with_tools", fake):
-        out = tool_calling.assistant(state)
-    assert out["messages"][0].content == "All 3 tests for REQ-2.1 passed."
+    out = InspectraGuard().after_model(state, None)
+    assert "messages" not in (out or {})  # the model's answer is left as it was
     assert "answer_withheld" not in _kinds()

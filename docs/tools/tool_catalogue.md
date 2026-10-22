@@ -1,7 +1,7 @@
 # Tool Catalogue — Week 4 (realigned)
 
 **Project:** Software-Engineering QA Agent (Inspectra)
-**Code:** implementations in [`src/qa_tools.py`](../../src/qa_tools.py) and [`src/sandbox.py`](../../src/sandbox.py); LangChain wrappers in [`src/tool_calling.py`](../../src/tool_calling.py)
+**Code:** implementations in [`src/qa_tools.py`](../../src/qa_tools.py) and [`src/sandbox.py`](../../src/sandbox.py); LangChain wrappers in [`src/agent_tools.py`](../../src/agent_tools.py)
 **Tests:** [`tests/test_tool_failures.py`](../../tests/test_tool_failures.py)
 
 This catalogue replaces the Week 4 subscription-tool catalogue (`get_user_subscription_status`,
@@ -29,7 +29,7 @@ Common result rules:
   `status` is the tool's own outcome. `run_tests` reports the tests' result separately in `test_outcome`.
 - Expected failures never raise: they return `{"status": "error", "error": "<reason>"}`.
 - Missing or wrongly typed arguments are rejected by the Pydantic schema before the tool runs.
-- Only these six tools exist. Any other tool name is refused by the allow-list in `_run_one_tool`.
+- Only these six tools exist. Any other tool name is refused by the allow-list in `InspectraGuard` (`src/guard_middleware.py`).
 - The agent may not merge, deploy, read secrets, run arbitrary shell commands or edit the
   SUT source (`sut/subscription_service/`). No tool offers those actions.
 
@@ -126,7 +126,7 @@ then appends `prompts/v1.1_pytest_output_addendum.txt`, which asks for one runna
 
 | Condition | Result |
 |---|---|
-| Path outside the allowed folders (e.g. `../../src/tool_calling.py`) | `error`: `... is outside the sandbox's allowed test folders.` |
+| Path outside the allowed folders (e.g. `../../src/agent_tools.py`) | `error`: `... is outside the sandbox's allowed test folders.` |
 | File does not exist | `error`: `Test file '...' does not exist.` |
 | Generated file fails the policy re-check | `error`: `Test file rejected by sandbox policy: ...` |
 | Run exceeds the timeout | `error`: `Test run exceeded the 60s sandbox timeout and was stopped.` |
@@ -171,8 +171,8 @@ the GitHub integration is added in the Week 6 realignment.
 
 **Output schema:** `{"status": "success | error | approval_required", "filed_path": "...", "channel": "local"}`
 
-**Authorization:** `_run_one_tool` asks the human (`request_human_approval`) and, only on approval,
-mints an HMAC-SHA256 token bound to `file_issue` and `{"draft_path": ...}` (single use, 120 s).
+**Authorization:** the run pauses for the human (Studio approve/reject card, or the terminal prompt in
+the CLI; the MCP server asks on its console). Only after approval does the guard mint an HMAC-SHA256 token bound to `file_issue` and `{"draft_path": ...}` (single use, 120 s).
 The tool verifies the token itself with `verify_and_consume_token`, so calling it directly without
 a token is refused.
 

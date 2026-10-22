@@ -1,7 +1,8 @@
 # Agent Task Contract — Week 5 (realigned)
 
 **Project:** Software-Engineering QA Agent (Inspectra)
-**Source of truth:** `AGENT_CONTRACT` in [`src/tool_calling.py`](../../src/tool_calling.py), checked by
+**Source of truth:** `AGENT_CONTRACT` in [`src/agent.py`](../../src/agent.py) (middleware in
+[`src/guard_middleware.py`](../../src/guard_middleware.py)), checked by
 [`tests/test_agent_contract.py`](../../tests/test_agent_contract.py)
 
 ## Goal
@@ -20,7 +21,7 @@
 | `file_issue` | **High** | **Yes**: signed single-use token, minted only after approval |
 | `save_test_to_suite` | **High** (changes `sut/tests/`) | **Yes** |
 
-Any other tool name is refused by the allow-list in `_run_one_tool`.
+Any other tool name is refused by the allow-list in `InspectraGuard` (`guard_middleware.py`).
 
 ## State
 
@@ -68,25 +69,29 @@ The agent has no tool for any of these, so it cannot do them:
 
 ```mermaid
 flowchart TD
-    start([Developer request]) --> assistant
-    assistant["assistant node<br/>Gemini + agent prompt v2.0<br/>chooses ONE next tool"]
-    assistant -- "no tool call" --> done([END: final answer])
-    assistant -- "tool call" --> exec
+    start([Developer request]) --> valid{"before_agent<br/>validate request"}
+    valid -- "rejected" --> refused([END: request_rejected])
+    valid -- "ok" --> budget
+    budget{"before_model<br/>hops >= MAX_HOPS (7)?"}
+    budget -- "yes" --> stopped([END: hop_budget_exhausted])
+    budget -- "no" --> model["model node<br/>agent prompt v2.0<br/>chooses ONE next tool"]
+    model -- "no tool call" --> answer["after_model<br/>redact · withhold unbacked claims"]
+    answer --> done([END: final answer])
+    model -- "tool call" --> gate
 
-    subgraph exec_box["execute_tools node"]
-        exec{"allow-list<br/>1 call per step"}
-        exec -- "unknown tool / extra call" --> err["error result"]
-        exec -- "low impact" --> low["search_requirements · propose_tests<br/>run_tests (sandbox) · draft_issue"]
-        exec -- "high impact" --> gate{{"human approval<br/>(case history shown)"}}
-        gate -- "approved: signed token" --> high["file_issue · save_test_to_suite"]
-        gate -- "rejected" --> rej["approval_required"]
+    gate{"approval gate<br/>(high-impact tool AND guard allows it?)"}
+    gate -- "high impact" --> card{{"human approval card<br/>(case history shown)"}}
+    gate -- "low impact, or guard refuses" --> tools
+    card -- "approve" --> tools
+    card -- "reject" --> rej["rejected: human_rejection"]
+    rej --> budget
+
+    subgraph tools_box["tools node (InspectraGuard.wrap_tool_call)"]
+        tools{"allow-list · phase guard<br/>file pinning · 1 call per step"}
+        tools -- "refused" --> err["error result"]
+        tools -- "allowed" --> run["search_requirements · propose_tests<br/>run_tests (sandbox) · draft_issue<br/>file_issue · save_test_to_suite (signed token)"]
     end
 
-    err --> route
-    low --> route
-    high --> route
-    rej --> route
-    route{"route_after_tools<br/>hops >= MAX_HOPS (7)?"}
-    route -- "no" --> assistant
-    route -- "yes" --> stopped([END: hop_budget_exhausted])
+    err --> budget
+    run --> budget
 ```

@@ -6,7 +6,7 @@ QA tool implementations for the Inspectra agent (Week 4, realigned).
 Workflow: find a requirement -> propose tests -> run them in the sandbox ->
 draft an issue for failures -> file the issue (human approval required).
 Every function returns a structured {"status": ...} dict and never raises for
-expected failures. src/tool_calling.py wraps these as LangChain tools.
+expected failures. src/agent_tools.py wraps these as LangChain tools.
 """
 
 from __future__ import annotations

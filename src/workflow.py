@@ -6,7 +6,7 @@ Explicit workflow state for one QA run (Week 6, realigned).
 The phase machine decides which tools are allowed next, and pins run_tests,
 file_issue and save_test_to_suite to the exact files produced earlier in the
 same run. Fields are updated only from tool results, never from LLM text.
-Used by the LangGraph agent (tool_calling.py) and the MCP server (mcp_server.py).
+Used by the LangGraph agent (guard_middleware.py) and the MCP server (mcp_server.py).
 """
 
 from __future__ import annotations

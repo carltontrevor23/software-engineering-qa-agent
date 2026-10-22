@@ -50,19 +50,6 @@ load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.8-flash")
 
-if not API_KEY:
-    raise RuntimeError(
-        "GEMINI_API_KEY not found. Create a .env file in the project "
-        "root with a line like: GEMINI_API_KEY=your_key_here"
-    )
-
-client = genai.Client(api_key=API_KEY)
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-TRACES_DIR = PROJECT_ROOT / "evidence" / "traces"
-TRACES_DIR.mkdir(parents=True, exist_ok=True)
-
-
 # Custom exception
 class ModelCallError(Exception):
     """
@@ -73,6 +60,27 @@ class ModelCallError(Exception):
     def __init__(self, message: str, cause: Exception | None = None):
         super().__init__(message)
         self.cause = cause
+
+
+_client = None
+
+
+def _get_client():
+    """Create the Gemini client on first use, so importing this module never needs a key."""
+    global _client
+    if _client is None:
+        if not API_KEY:
+            raise ModelCallError(
+                "GEMINI_API_KEY not found. Create a .env file in the project "
+                "root with a line like: GEMINI_API_KEY=your_key_here"
+            )
+        _client = genai.Client(api_key=API_KEY)
+    return _client
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TRACES_DIR = PROJECT_ROOT / "evidence" / "traces"
+TRACES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Core function (now with error handling + light retry)
@@ -115,10 +123,11 @@ def get_model_response(
     import time
 
     last_error: Exception | None = None
+    api = _get_client()
 
     for attempt in range(1, max_retries + 2):  # e.g. max_retries=3 -> 4 attempts
         try:
-            interaction = client.interactions.create(
+            interaction = api.interactions.create(
                 model=MODEL_NAME,
                 input=prompt,
             )

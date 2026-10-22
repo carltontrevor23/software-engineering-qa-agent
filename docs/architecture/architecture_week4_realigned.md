@@ -11,7 +11,7 @@ flowchart LR
     dev([Developer])
 
     subgraph app["Inspectra (src/)"]
-        orch["LangGraph orchestrator<br/>tool_calling.py<br/>allow-list, 1 call per step, MAX_HOPS"]
+        orch["LangGraph create_agent + middleware<br/>agent.py, guard_middleware.py<br/>allow-list, 1 call per step, MAX_HOPS"]
         gate{{"Approval gate<br/>approval.py<br/>HMAC single-use token"}}
         mem[("Case history<br/>memory.py<br/>data/memory/*.jsonl")]
     end

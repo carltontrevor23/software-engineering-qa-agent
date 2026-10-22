@@ -12,21 +12,21 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src import tool_calling
-from src.tool_calling import assistant, execute_tools
-
-# The modules tool_calling actually uses (imported by bare name from src/).
-memory = sys.modules[tool_calling.record_case.__module__]
-approval = sys.modules[tool_calling.request_human_approval.__module__]
-qa_tools = tool_calling.qa_tools
-workflow = tool_calling.workflow
+# The module objects the agent actually uses (imported by bare name from src/).
+import approval
+import demo_support
+import memory
+import qa_tools
+import sandbox
+import workflow
+from offline import build_offline_agent
 
 
 def test_record_and_retrieve_round_trip():
@@ -116,57 +116,40 @@ def test_format_history_line():
     )
 
 
-def test_case_history_never_reaches_llm_or_token(capsys, tmp_path, monkeypatch):
+def test_case_history_never_reaches_llm_or_token(tmp_path, monkeypatch):
+    generated = tmp_path / "generated"
+    monkeypatch.setattr(sandbox, "GENERATED_DIR", generated)
+    monkeypatch.setattr(sandbox, "ALLOWED_TEST_DIRS", [generated, sandbox.SUT_DIR / "tests"])
     monkeypatch.setattr(qa_tools, "ISSUES_DIR", tmp_path / "issues")
-    draft = qa_tools.draft_issue(
-        "REQ-2.1", "Upgrade rejected at $50.00", "AC-2 boundary fails.", ["test_exactly_50"]
-    )["draft_path"]
 
     memory.record_case("REQ-2.1", "run_tests", "success", 0, test_outcome="passed", failed_count=0)
-    memory.record_case("REQ-2.1", "run_tests", "success", 1, test_outcome="failed", failed_count=1)
     seeded = memory.get_case_history("REQ-2.1", tool_name="run_tests")
-    leak_markers = ["CASE HISTORY", "ADVISORY", "FIRST FAILURE"]
-    leak_markers += [h["timestamp"] for h in seeded]
+    leak_markers = ["CASE HISTORY", "ADVISORY", "FIRST FAILURE"] + [h["timestamp"] for h in seeded]
 
-    approval_args = []
+    graph = build_offline_agent(planted_bug=True, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "history"}}
+    state = graph.invoke(
+        {"messages": [HumanMessage(content="Check REQ-2.1 (Tier Upgrades) against the code.")]}, config)
 
-    def auto_approve(tool_name, args):
-        approval_args.append(dict(args))
-        return approval.request_human_approval(tool_name, args, auto_decision=True)
+    # The human approver sees the history and the advisory on the approval card ...
+    action = state["__interrupt__"][0].value["action_requests"][0]
+    assert "[CASE HISTORY] REQ-2.1: run_tests -> failed (1 failed)" in action["description"]
+    assert "[ADVISORY] FIRST FAILURE: previously passing" in action["description"]
+    # ... which carries only the tool's own arguments, never a token.
+    assert action["args"] == {"draft_path": state["draft_path"]}
 
-    call = {"name": "file_issue", "args": {"draft_path": draft}, "id": "c1", "type": "tool_call"}
-    msg = AIMessage(content="", tool_calls=[call])
-    state = {"messages": [msg], "hops": 2, **workflow.new_workflow(),
-             "phase": workflow.ISSUE_DRAFTED, "requirement_id": "REQ-2.1", "draft_path": draft}
-    with patch("src.tool_calling.request_human_approval", side_effect=auto_approve):
-        out = execute_tools(state)
-
-    # The human operator did see the history and the advisory.
-    printed = capsys.readouterr().out
-    assert "[CASE HISTORY] REQ-2.1: run_tests -> failed (1 failed)" in printed
-    assert "[ADVISORY] FIRST FAILURE: previously passing" in printed
-    assert "'status': 'success'" in out["messages"][0].content
-
-    # Arguments bound into the approval token carry only the tool's own args.
-    assert approval_args == [{"draft_path": draft}]
-
-    # Nothing from the history appears in the tool results or the new state ...
-    for tm in out["messages"]:
+    # Nothing from the history is in the messages the model sees or in the workflow state.
+    for message in state["messages"]:
         for marker in leak_markers:
-            assert marker not in str(tm.content)
-    assert not any(marker in str(out[k]) for k in workflow.FIELDS for marker in leak_markers)
+            assert marker not in str(message.content)
+    assert not any(marker in str(state[k]) for k in workflow.FIELDS for marker in leak_markers)
 
-    # ... or in the messages assistant() sends to the LLM.
-    fake_llm = MagicMock()
-    fake_llm.invoke.return_value = AIMessage(content="Issue filed.")
-    next_state = {**state, **out, "messages": [HumanMessage(content="Check REQ-2.1"), msg, *out["messages"]]}
-    with patch.object(tool_calling, "llm_with_tools", fake_llm):
-        assistant(next_state)
-    sent = fake_llm.invoke.call_args.args[0]
-    for m in sent:
-        for marker in leak_markers:
-            assert marker not in str(m.content)
+    # Approval mints a token bound to the tool's own arguments; the tool accepts it.
+    final = graph.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config)
+    assert final["stop_reason"] == "issue_filed"
+    filed = [m for m in final["messages"] if isinstance(m, ToolMessage) and m.name == "file_issue"]
+    assert '"status": "success"' in filed[-1].content
 
-    # The executed call itself was recorded with the pre-increment hop count.
+    # The executed call was recorded with the hop count before this step.
     latest = memory.get_case_history("REQ-2.1", limit=1)[0]
-    assert (latest["tool_name"], latest["status"], latest["hops"]) == ("file_issue", "success", 2)
+    assert (latest["tool_name"], latest["status"], latest["hops"]) == ("file_issue", "success", 4)

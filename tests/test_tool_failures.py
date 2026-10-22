@@ -19,7 +19,7 @@ from pydantic import ValidationError
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.tool_calling import (
+from agent_tools import (
     draft_issue,
     file_issue,
     propose_tests,
@@ -199,7 +199,7 @@ def test_validate_generated_code_accepts_allowed_imports():
 # =====================================================================
 
 def test_run_tests_outside_allowed_dirs_is_refused():
-    res = run_tests.invoke({"requirement_id": "REQ-2.1", "test_file": "../../src/tool_calling.py"})
+    res = run_tests.invoke({"requirement_id": "REQ-2.1", "test_file": "../../src/agent_tools.py"})
     assert res["status"] == "error"
     assert "outside the sandbox" in res["error"]
 
@@ -313,7 +313,7 @@ def test_save_test_to_suite_without_token_is_blocked():
 
 
 def test_save_test_to_suite_outside_generated_is_refused():
-    target = str(PROJECT_ROOT / "src" / "tool_calling.py")
+    target = str(PROJECT_ROOT / "src" / "agent_tools.py")
     token = approval.create_approval_token("save_test_to_suite", {"test_file": target})
     res = save_test_to_suite.invoke({"test_file": target, "approval_token": token})
     assert res["status"] == "error"
@@ -419,13 +419,10 @@ def test_file_issue_without_github_env_files_locally(monkeypatch):
 def test_github_token_never_in_tool_message_or_memory(github_env):
     import memory
     import workflow
-    from langchain_core.messages import AIMessage
-    from src.tool_calling import execute_tools
+    from harness import execute_tools, tool_call
 
     draft = _make_draft()
-    approval.set_approval_hook(lambda tool_name, args: True)
-    msg = AIMessage(content="", tool_calls=[
-        {"name": "file_issue", "args": {"draft_path": draft}, "id": "c1", "type": "tool_call"}])
+    msg = tool_call("file_issue", {"draft_path": draft})
     state = {"messages": [msg], "hops": 0, **workflow.new_workflow(),
              "phase": "ISSUE_DRAFTED", "requirement_id": "REQ-2.1", "draft_path": draft}
     for code in (201, 401):

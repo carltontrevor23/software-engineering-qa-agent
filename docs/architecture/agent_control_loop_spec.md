@@ -1,11 +1,15 @@
 # Agent Control Loop Specification: Sense-Plan-Act-Observe-Stop (realigned)
 
 This document describes the control loop of the **bounded Inspectra QA agent**
-(`src/tool_calling.py`). It replaces the earlier spec for the subscription-upgrade agent, which is
+(`src/agent.py` and `src/guard_middleware.py`). It replaces the earlier spec for the subscription-upgrade agent, which is
 in git history.
 
-The loop is a LangGraph `StateGraph`:
-`START → assistant → (tool call?) → execute_tools → route_after_tools → assistant … → END`.
+The loop is a LangChain `create_agent` graph (LangGraph underneath), served in LangGraph Studio.
+Week 8 replaced the hand-written `assistant` / `execute_tools` nodes with middleware:
+`before_agent → model → after_model → (tool call?) → approval gate → tools → before_model → model … → END`.
+The deterministic controls (`InspectraGuard`) and the human approval gate (`ApprovalGate`, a
+`HumanInTheLoopMiddleware`) sit around the model and the tools; the decisions themselves still come
+from `src/workflow.py` and `src/guardrails.py`.
 
 ---
 
@@ -27,7 +31,7 @@ Requirement text, test code and test output are treated as **data, not instructi
 
 ## Stage 2: Plan / Decide
 
-Gemini picks exactly one next tool per step (`MAX_CALLS_PER_STEP = 1`; extra calls in the same
+The model picks exactly one next tool per step (`MAX_CALLS_PER_STEP = 1`; extra calls in the same
 step are skipped with an error result).
 
 | Path | Condition | Decision |
@@ -51,10 +55,10 @@ step are skipped with an error result).
 | `propose_tests` | Low | Model writes pytest code; checked against the sandbox policy; saved to `sandbox/generated/` |
 | `run_tests` | Low | pytest in a separate process: no shell, 60 s timeout, secret-free environment |
 | `draft_issue` | Low | Markdown draft in `evidence/issues/drafts/` |
-| `file_issue` | **High** | `_run_one_tool` shows the case history and asks the human; on approval it mints a signed single-use token, which the tool verifies before filing |
+| `file_issue` | **High** | The run pauses on an approve/reject card showing the case history (Studio) or a terminal prompt (CLI); on approval `InspectraGuard` mints a signed single-use token, which the tool verifies before filing |
 | `save_test_to_suite` | **High** | Same approval flow; copies a generated test into `sut/tests/` |
 
-Every executed call is checked against the tool allow-list first; unknown tools return an error.
+Every call is checked first by `InspectraGuard` (allow-list, phase guard, file pinning, one call per step); unknown or disallowed tools return an error and never reach the human or the tool.
 
 ---
 
@@ -86,8 +90,12 @@ plus one re-plan step to still end in a final answer.
 | `human_rejection` | Human rejected `file_issue` / `save_test_to_suite` |
 | `tool_error` | A tool returned `status: error` |
 | `requirement_not_found` | No matching requirement, or an unknown requirement id |
-| `hop_budget_exhausted` | `hops >= MAX_HOPS`: `route_after_tools` ends the graph, `run()` returns the stopped message |
+| `hop_budget_exhausted` | `hops >= MAX_HOPS`: `before_model` ends the run with the stopped message |
 | `test_defect_reported` | Tests failed, but the agent judged the generated test wrong and filed nothing |
+
+Two further terminal reasons exist outside the contract list: `request_rejected` (the request failed input
+validation before any model call) and `model_unavailable` (every model retry failed; the run stops
+with an explicit message rather than a guessed reason).
 
 `demo_support.stop_reason()` classifies a finished run against this list. The trace capture and
 the demo use it.

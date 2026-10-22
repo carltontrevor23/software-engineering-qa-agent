@@ -6,20 +6,21 @@ script (src/capture_week5_traces.py) and the agent tests:
 
   - planted_bug_sut(): run against a temporary SUT copy with one planted defect.
     The real sut/ folder is never modified.
-  - ScriptedLLM: an offline stand-in for Gemini that follows the agent rules
+  - ScriptedLLM: an offline stand-in for the live model that follows the agent rules
     deterministically. Every message it writes starts with "[SCRIPTED LLM]".
   - fixture_model_reply(): the hand-written REQ-2.1 tests, returned in place of
     the model's propose_tests reply in offline mode.
   - trace_run() / stop_reason(): stream one graph run, record a compact per-hop
     trace and classify why it stopped.
 
-This module does not import tool_calling, so callers pass in the graph and
-patch the LLM on whichever tool_calling module object they use.
+This module does not import the agent, so callers pass in the graph (see agent.py and
+offline.py).
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shutil
 import tempfile
@@ -79,11 +80,15 @@ def fixture_model_reply(*_args: Any, **_kwargs: Any) -> str:
 # ---------------------------------------------------------------------
 
 def _parse_result(content: Any) -> Dict[str, Any]:
-    try:
-        value = ast.literal_eval(str(content))
+    """A tool result as a dict: JSON (what the agent's tool node produces) or a Python repr."""
+    text = _text(content)
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            value = parse(text)
+        except (ValueError, SyntaxError):
+            continue
         return value if isinstance(value, dict) else {}
-    except (ValueError, SyntaxError):
-        return {}
+    return {}
 
 
 class ScriptedLLM:
@@ -197,52 +202,86 @@ def trace_run(
     prompt: str,
     printer: Optional[Callable[[str], None]] = print,
     initial_state: Optional[Dict[str, Any]] = None,
+    decide: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Run the graph once and return (final_state, steps).
 
     Each step records hop, node, tool, args, status/test_outcome, workflow phase and latency.
-    Pass tool_calling.initial_state(prompt) so the workflow fields start initialised.
+    The graph must have a checkpointer, so the run can pause for human approval. When it
+    does, decide(action_request) is called for each pending action and must return
+    {"type": "approve"} or {"type": "reject", "message": ...}; the run then resumes.
     """
-    state = initial_state or {"messages": [HumanMessage(content=prompt)], "hops": 0}
+    from uuid import uuid4
+
+    from langgraph.types import Command
+
+    state = initial_state or {"messages": [HumanMessage(content=prompt)]}
+    config = {"configurable": {"thread_id": uuid4().hex}}
+    payload: Any = state
     final_state: Dict[str, Any] = state
     steps: List[Dict[str, Any]] = []
+    seen_calls = set()
     hops = 0
     started = time.perf_counter()
 
-    for mode, chunk in graph.stream(state, stream_mode=["updates", "values"]):
-        if mode == "values":
-            final_state = chunk
-            continue
-        latency = round(time.perf_counter() - started, 2)
-        started = time.perf_counter()
-        for node, delta in chunk.items():
-            hops = delta.get("hops", hops)
-            phase = delta.get("phase")
-            for msg in delta.get("messages", []):
-                if isinstance(msg, AIMessage) and msg.tool_calls:
-                    call = msg.tool_calls[0]
-                    step = {"hop": hops, "node": node, "action": "call_tool", "tool": call["name"],
-                            "args": call["args"], "latency_s": latency}
-                    line = f"hop {hops} | {node:<13} | call {call['name']}({_short_args(call['args'])})"
-                elif isinstance(msg, AIMessage):
-                    step = {"hop": hops, "node": node, "action": "final_answer",
-                            "text": _text(msg.content).strip(), "latency_s": latency}
-                    line = f"hop {hops} | {node:<13} | final answer"
-                elif isinstance(msg, ToolMessage):
-                    result = _parse_result(msg.content)
-                    step = {"hop": hops, "node": node, "action": "tool_result", "tool": msg.name,
-                            "status": result.get("status"), "test_outcome": result.get("test_outcome"),
-                            "result": result or str(msg.content), "latency_s": latency}
-                    outcome = f" test_outcome={result['test_outcome']}" if result.get("test_outcome") else ""
-                    line = f"hop {hops} | {node:<13} | {msg.name} -> status={result.get('status')}{outcome}"
-                else:
+    while True:
+        interrupts = None
+        for mode, chunk in graph.stream(payload, config, stream_mode=["updates", "values"]):
+            if mode == "values":
+                final_state = chunk
+                continue
+            if "__interrupt__" in chunk:
+                interrupts = chunk["__interrupt__"]
+                continue
+            latency = round(time.perf_counter() - started, 2)
+            started = time.perf_counter()
+            for node, delta in chunk.items():
+                if not isinstance(delta, dict):
                     continue
-                if phase:
-                    step["phase"] = phase
-                    line += f" [phase {phase}]"
-                steps.append(step)
-                if printer:
-                    printer(f"{line}  ({latency}s)")
+                hops = delta.get("hops", hops)
+                phase = delta.get("phase")
+                for msg in delta.get("messages", []):
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        call = msg.tool_calls[0]
+                        if call["id"] in seen_calls:  # the approval hook re-emits the model message
+                            continue
+                        seen_calls.add(call["id"])
+                        step = {"hop": hops, "node": node, "action": "call_tool", "tool": call["name"],
+                                "args": call["args"], "latency_s": latency}
+                        line = f"hop {hops} | {node:<13} | call {call['name']}({_short_args(call['args'])})"
+                    elif isinstance(msg, AIMessage):
+                        step = {"hop": hops, "node": node, "action": "final_answer",
+                                "text": _text(msg.content).strip(), "latency_s": latency}
+                        line = f"hop {hops} | {node:<13} | final answer"
+                    elif isinstance(msg, ToolMessage):
+                        result = _parse_result(msg.content)
+                        step = {"hop": hops, "node": node, "action": "tool_result", "tool": msg.name,
+                                "status": result.get("status"), "test_outcome": result.get("test_outcome"),
+                                "result": result or str(msg.content), "latency_s": latency}
+                        outcome = f" test_outcome={result['test_outcome']}" if result.get("test_outcome") else ""
+                        line = f"hop {hops} | {node:<13} | {msg.name} -> status={result.get('status')}{outcome}"
+                    else:
+                        continue
+                    if phase:
+                        step["phase"] = phase
+                        line += f" [phase {phase}]"
+                    steps.append(step)
+                    if printer:
+                        printer(f"{line}  ({latency}s)")
+        if not interrupts:
+            break
+        if decide is None:
+            raise RuntimeError("The run paused for human approval but no decide() was given.")
+        decisions = []
+        for action in interrupts[0].value["action_requests"]:
+            decision = decide(action)
+            decisions.append(decision)
+            steps.append({"hop": hops, "node": "human", "action": "human_decision",
+                          "tool": action["name"], "decision": decision["type"]})
+            if printer:
+                printer(f"hop {hops} | {'human':<13} | {action['name']} -> {decision['type']}")
+        payload = Command(resume={"decisions": decisions})
+        started = time.perf_counter()
     return final_state, steps
 
 

@@ -13,7 +13,7 @@ history.
 The server exposes Inspectra's QA capabilities to any MCP client (an IDE assistant, another
 agent). It reuses the agent's own controls instead of re-implementing them:
 - the same tool functions (`qa_tools.py`);
-- the same human approval gate and signed tokens (`tool_calling._run_one_tool`, `approval.py`);
+- the same human approval gate and signed tokens (`tool_runner.run_one_tool`, `approval.py`; console approval, since an MCP client has no Studio card);
 - the same phase guard and file pinning (`workflow.py`), kept per server session;
 - the same sandbox (`sandbox.py`).
 
