@@ -50,22 +50,27 @@ SUT_FILE = Path("subscription_service") / "subscription_manager.py"
 def planted_bug_sut() -> Iterator[Path]:
     """Copy the SUT to a temp folder, plant the boundary bug there, and point the
     sandbox at the copy for the duration of the block."""
+    import project_config
+    import qa_tools
+
     tmp_root = Path(tempfile.mkdtemp(prefix="inspectra_planted_"))
     copy = tmp_root / "sut"
-    shutil.copytree(sandbox.SUT_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    # The planted bug belongs to the bundled sample, whatever project .env points at.
+    shutil.copytree(project_config.DEFAULT_CODE_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
     target = copy / SUT_FILE
     source = target.read_text(encoding="utf-8")
     count = source.count(PLANTED_BUG_FROM)
     assert count == 1, f"Expected exactly one '{PLANTED_BUG_FROM}' in the SUT, found {count}."
     target.write_text(source.replace(PLANTED_BUG_FROM, PLANTED_BUG_TO), encoding="utf-8")
 
-    saved = (sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS)
+    saved = (sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS, qa_tools.REQUIREMENTS_DIR)
+    qa_tools.REQUIREMENTS_DIR = project_config.DEFAULT_REQUIREMENTS_DIR
     sandbox.SUT_DIR = copy
     sandbox.ALLOWED_TEST_DIRS = [sandbox.GENERATED_DIR, copy / "tests"]
     try:
         yield copy
     finally:
-        sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS = saved
+        sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS, qa_tools.REQUIREMENTS_DIR = saved
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 

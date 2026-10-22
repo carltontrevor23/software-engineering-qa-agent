@@ -23,13 +23,15 @@ from typing import Any, Dict, List, Optional
 import requests
 
 import guardrails
+import project_config
 import sandbox
 from approval import verify_and_consume_token
 from model_client import ModelCallError, build_test_proposal_prompt, get_model_response
 from rag import build_rag_pipeline
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-REQUIREMENTS_DIR = PROJECT_ROOT / "docs" / "requirements"
+# The requirements to check: INSPECTRA_REQUIREMENTS_DIR in .env, default docs/requirements.
+REQUIREMENTS_DIR = project_config.requirements_dir()
 ISSUES_DIR = PROJECT_ROOT / "evidence" / "issues"
 PROMPT_TEMPLATE = PROJECT_ROOT / "prompts" / "v1.1_test_proposal.txt"
 PROMPT_ADDENDUM = PROJECT_ROOT / "prompts" / "v1.1_pytest_output_addendum.txt"
@@ -38,11 +40,6 @@ PROMPT_VERSION = "v1.1+pytest-addendum-v1"
 GITHUB_API = "https://api.github.com/repos/{repo}/issues"
 GITHUB_LABELS = ["inspectra-qa"]
 GITHUB_TIMEOUT_SECONDS = 15
-SUT_MODULE = Path("subscription_service") / "subscription_manager.py"
-SUT_IMPORT_LINE = (
-    "from subscription_service.subscription_manager import (SubscriptionManager, "
-    "InsufficientFundsError, InactiveUserError, AlreadyPremiumError, UserNotFoundError)"
-)
 
 _SECTION_RE = re.compile(r"^##\s+Section\s+(\d+(?:\.\d+)*)\s*:\s*(.+?)\s*$")
 _CODE_BLOCK_RE = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
@@ -52,8 +49,16 @@ _CODE_BLOCK_RE = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
 # Requirement IDs (deterministic, no LLM)
 # ---------------------------------------------------------------------
 
+def _source_label(path: Path) -> str:
+    """Repo-relative path for files inside this repository, else 'folder/file' (no absolute paths)."""
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        return f"{path.parent.name}/{path.name}"
+
+
 def list_requirements() -> List[Dict[str, Any]]:
-    """Parse '## Section X.Y: Title' headings in docs/requirements into REQ-X.Y records."""
+    """Parse '## Section X.Y: Title' headings in the requirements folder into REQ-X.Y records."""
     requirements = []
     for path in sorted(REQUIREMENTS_DIR.glob("*.md")):
         current = None
@@ -67,7 +72,7 @@ def list_requirements() -> List[Dict[str, Any]]:
                 current = {
                     "requirement_id": f"REQ-{match.group(1)}",
                     "title": match.group(2),
-                    "source_file": f"docs/requirements/{path.name}",
+                    "source_file": _source_label(path),
                 }
                 body = [line.strip()]
             elif current is not None:
@@ -87,6 +92,8 @@ def load_requirement(requirement_id: str) -> Dict[str, Any]:
     for req in list_requirements():
         if req["requirement_id"] == requirement_id:
             return {"status": "success", **req}
+    if not any(REQUIREMENTS_DIR.glob("*.md")):
+        return {"status": "error", "error": f"No requirement files (*.md) in '{REQUIREMENTS_DIR.name}'."}
     return {"status": "error", "error": f"Unknown requirement '{requirement_id}'."}
 
 
@@ -152,12 +159,9 @@ def search_requirements(query: str, top_k: int = 3) -> Dict[str, Any]:
     return {"status": "success", "results": results}
 
 
-def _sut_module_description() -> str:
-    source = (sandbox.SUT_DIR / SUT_MODULE).read_text(encoding="utf-8")
-    return (
-        f"Module: sut/{SUT_MODULE.as_posix()}\n"
-        f"Import it in tests with: {SUT_IMPORT_LINE}\n\n{source}"
-    )
+def _sut_module_description() -> tuple:
+    """(module text for the prompt, dotted name of the first module) for the configured code."""
+    return project_config.module_description(Path(sandbox.SUT_DIR))
 
 
 def propose_tests(requirement_id: str) -> Dict[str, Any]:
@@ -168,13 +172,21 @@ def propose_tests(requirement_id: str) -> Dict[str, Any]:
     req = load_requirement(requirement_id)
     if req["status"] != "success":
         return req
+    try:
+        module_text, first_module = _sut_module_description()
+    except (project_config.ProjectConfigError, OSError) as e:
+        return {"status": "error", "error": f"The code under test cannot be read: {e}"}
 
     prompt = build_test_proposal_prompt(
         template_path=str(PROMPT_TEMPLATE),
-        module_description=_sut_module_description(),
+        module_description=module_text,
         requirements_excerpt=f"Source: {req['source_file']}\n{req['text']}",
     )
-    prompt += "\n\n" + PROMPT_ADDENDUM.read_text(encoding="utf-8")
+    addendum = PROMPT_ADDENDUM.read_text(encoding="utf-8")
+    addendum = addendum.replace("{{first_module}}", first_module).replace(
+        "{{packages}}", ", ".join(sorted(project_config.top_level_packages(Path(sandbox.SUT_DIR))))
+    )
+    prompt += "\n\n" + addendum
 
     try:
         reply = get_model_response(prompt, prompt_version=PROMPT_VERSION)
@@ -319,7 +331,7 @@ def _file_on_github(source: Path, token: str, repo: str) -> Dict[str, Any]:
 
 
 def save_test_to_suite(test_file: str, approval_token: Optional[str] = None) -> Dict[str, Any]:
-    """HIGH IMPACT: copy a generated test into sut/tests (a repo change)."""
+    """HIGH IMPACT: copy a generated test into the code folder's tests/ (a repo change)."""
     is_valid, reason = verify_and_consume_token(
         approval_token, "save_test_to_suite", {"test_file": test_file}
     )

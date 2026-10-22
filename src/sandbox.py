@@ -19,10 +19,13 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Set, Tuple
+
+import project_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SUT_DIR = PROJECT_ROOT / "sut"
+# The code under test: INSPECTRA_CODE_DIR in .env, default sut/ (see project_config.py).
+SUT_DIR = project_config.code_dir()
 GENERATED_DIR = PROJECT_ROOT / "sandbox" / "generated"
 ALLOWED_TEST_DIRS = [GENERATED_DIR, SUT_DIR / "tests"]
 TEST_TIMEOUT_SECONDS = 60
@@ -30,7 +33,6 @@ MAX_OUTPUT_CHARS = 4000
 
 ALLOWED_IMPORTS = {
     "pytest", "unittest", "json", "os", "tempfile", "pathlib", "requests",
-    "subscription_service",
 }
 BANNED_IMPORTS = {"subprocess", "socket", "shutil", "ctypes", "urllib", "http"}
 BANNED_BUILTINS = {"eval", "exec", "compile", "__import__"}
@@ -44,6 +46,11 @@ def _root_module(name: str) -> str:
     return name.split(".")[0]
 
 
+def allowed_imports() -> Set[str]:
+    """The fixed allow-list plus the packages and modules of the code under test."""
+    return ALLOWED_IMPORTS | project_config.top_level_packages(Path(SUT_DIR))
+
+
 def validate_generated_code(code: str) -> Tuple[bool, str]:
     """Static check of generated test code. Returns (ok, reason)."""
     try:
@@ -51,6 +58,7 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
     except SyntaxError as e:
         return False, f"Generated code does not parse: {e.msg} (line {e.lineno})."
 
+    permitted = allowed_imports()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.ImportFrom):
@@ -63,7 +71,7 @@ def validate_generated_code(code: str) -> Tuple[bool, str]:
                 root = _root_module(name)
                 if root in BANNED_IMPORTS:
                     return False, f"Import of '{name}' is not allowed."
-                if root not in ALLOWED_IMPORTS:
+                if root not in permitted:
                     return False, f"Import of '{name}' is not on the allow-list."
         elif isinstance(node, ast.Name) and node.id in BANNED_BUILTINS:
             return False, f"Use of '{node.id}' is not allowed."

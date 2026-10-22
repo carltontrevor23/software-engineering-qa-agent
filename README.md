@@ -94,6 +94,28 @@ python demo/run_demo.py --requirement REQ-2.4    # another requirement
 **Trace capture:** `python src/capture_traces.py` runs three scenarios and writes
 `evidence/traces/week8_traces.jsonl` and `evidence/week8_execution_traces.md`.
 
+## Checking your own project
+
+By default the agent checks the bundled sample (`docs/requirements` and `sut/`). To check
+another project, set these in `.env` (the operator sets them; the model cannot):
+
+| Setting | Meaning |
+|---|---|
+| `INSPECTRA_REQUIREMENTS_DIR` | Folder of `.md` requirement files. Each requirement is a `## Section X.Y: Title` heading (it becomes `REQ-X.Y`) followed by its acceptance criteria. |
+| `INSPECTRA_CODE_DIR` | The folder that holds the importable package(s) under test (the folder you would put on `PYTHONPATH`). Approved tests are saved to its `tests/` folder. It cannot be this repository's root. |
+| `INSPECTRA_CODE_MODULES` | Optional. Comma-separated `.py` files, relative to the code folder, shown to the test writer. Default: every non-test `.py` file. |
+
+Check the setup, then restart the server (or rerun the CLI):
+
+```
+venv\Scripts\python.exe src\project_config.py
+```
+
+Limits: one project per server (restart after changing `.env`); only `.md` requirements; the
+code is read from a local folder (no GitHub or pull-request source yet); generated tests may
+import only the standard test libraries, `requests` and the project's own packages. The offline
+graph and `--planted-bug` demo always use the bundled sample.
+
 ## Running the MCP server
 
 ```
