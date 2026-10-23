@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import qa_tools
+import tracer
 from agent_tools import TOOLS_BY_NAME
 from approval import is_high_impact, request_human_approval
 from memory import advisory, format_history, get_case_history, record_case
@@ -29,6 +30,7 @@ def run_one_tool(tool_name: str, args: Dict[str, Any], requirement_id: Optional[
         print(format_history(case_key, history))
         print(f"[ADVISORY] {advisory(history)} (advisory only - the decision is yours)")
         approved, token, message = request_human_approval(tool_name, args)
+        tracer.record_approval_event(tool_name, args, "APPROVED" if approved else "REJECTED")
         if not approved:
             return {"status": "approval_required", "error": message}
         args["approval_token"] = token               # signed, single-use

@@ -21,6 +21,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 
 import approval
+import guardrails
+import tracer
 import workflow
 from agent_state import InspectraState
 from agent_tools import TOOLS, TOOLS_BY_NAME
@@ -126,19 +128,54 @@ def final_text(state: Dict[str, Any]) -> str:
 
 
 def run(prompt: str, decide: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
-        graph: Any = None) -> str:
-    """Send one request through the agent and return the final answer."""
+        graph: Any = None, capture_trace: bool = True) -> str:
+    """Send one request through the agent and return the final answer. Every run, including a
+    rejected request or a model failure, leaves an execution trace (src/tracer.py)."""
+    import time
+    from datetime import datetime, timezone
     from uuid import uuid4
 
     from langgraph.checkpoint.memory import InMemorySaver
 
-    agent = graph or build_agent(checkpointer=InMemorySaver())
-    config = {"configurable": {"thread_id": uuid4().hex}}
-    state = agent.invoke({"messages": [HumanMessage(content=prompt)]}, config)
-    while state.get("__interrupt__"):
-        state = agent.invoke(resume_value(state["__interrupt__"], decide or terminal_decision), config)
+    start = time.perf_counter()
+    start_utc = datetime.now(timezone.utc).isoformat()
+    model_name = model_label()
+    try:
+        agent = graph or build_agent(checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": uuid4().hex}}
+        state = agent.invoke({"messages": [HumanMessage(content=prompt)]}, config)
+        while state.get("__interrupt__"):
+            state = agent.invoke(resume_value(state["__interrupt__"], decide or terminal_decision), config)
+    except Exception as exc:  # a missing key, or the model failing after every retry
+        safe_error, _ = guardrails.redact(str(exc))
+        answer = f"[ERROR] Model or graph execution failed: {safe_error}"
+        print("[stop_reason] tool_error (phase STOPPED)")
+        if capture_trace:
+            tracer.record_execution_trace(
+                prompt=prompt,
+                final_state={"messages": [HumanMessage(content=prompt)], "phase": workflow.STOPPED,
+                             "stop_reason": "tool_error"},
+                final_answer=answer, start_utc=start_utc, duration_s=time.perf_counter() - start,
+                model_name=model_name, prompt_version=PROMPT_VERSION,
+                errors=[{"type": type(exc).__name__, "error": safe_error}],
+            )
+        return answer
+
+    duration = time.perf_counter() - start
+    answer = final_text(state)
     print(f"[stop_reason] {state.get('stop_reason')} (phase {state.get('phase')})")
-    return final_text(state)
+    if capture_trace:
+        if state.get("stop_reason") == "request_rejected":
+            tracer.record_input_rejection_trace(
+                prompt=prompt, error_message=answer.replace("[GUARDRAIL] Request rejected: ", ""),
+                start_utc=start_utc, duration_s=duration, model_name=model_name, prompt_version=PROMPT_VERSION,
+            )
+        else:
+            tracer.record_execution_trace(
+                prompt=prompt, final_state=state, final_answer=answer, start_utc=start_utc,
+                duration_s=duration, model_name=model_name, prompt_version=PROMPT_VERSION,
+            )
+    return answer
 
 
 if __name__ == "__main__":

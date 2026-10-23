@@ -23,8 +23,17 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src import tool_calling
-tracer = tool_calling.tracer
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+import agent
+import models
+import tracer
+from langgraph.checkpoint.memory import InMemorySaver
+from harness import ExplodingModel, FixedCallsModel
+
+
+def agent_graph(model):
+    return agent.build_agent(model=model, checkpointer=InMemorySaver())
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +48,7 @@ def clean_observability(tmp_path, monkeypatch):
 
 def test_input_rejection_trace_captures_prompt_latency_and_error(clean_observability):
     """Input rejected by guardrails must still produce an observability trace."""
-    answer = tool_calling.run("", capture_trace=True)
+    answer = agent.run("", graph=agent_graph(ExplodingModel()), capture_trace=True)
     assert "[GUARDRAIL] Request rejected" in answer
 
     traces = tracer.get_recent_traces()
@@ -47,7 +56,7 @@ def test_input_rejection_trace_captures_prompt_latency_and_error(clean_observabi
     t = traces[0]
 
     # Model & Prompt evidence
-    assert t["model"]["prompt_version"] == "v2.0"
+    assert t["model"]["prompt_version"] == agent.PROMPT_VERSION
     assert t["prompt"]["char_count"] == 0
 
     # Latency & Error evidence
@@ -69,19 +78,16 @@ def test_input_rejection_trace_captures_prompt_latency_and_error(clean_observabi
 
 def test_trace_captures_model_prompt_and_outcome(clean_observability):
     """Standard run must capture model evidence, prompt evidence, and final answer outcome."""
-    fake_llm = MagicMock()
-    fake_llm.invoke.return_value = AIMessage(content="Requirement REQ-2.1 verified.")
-
-    with patch.object(tool_calling, "llm_with_tools", fake_llm):
-        answer = tool_calling.run("Check REQ-2.1 against the code", capture_trace=True)
+    fake_model = FixedCallsModel(script=[AIMessage(content="Requirement REQ-2.1 verified.")])
+    answer = agent.run("Check REQ-2.1 against the code", graph=agent_graph(fake_model), capture_trace=True)
 
     assert answer == "Requirement REQ-2.1 verified."
     traces = tracer.get_recent_traces()
     assert len(traces) == 1
     t = traces[0]
 
-    assert t["model"]["name"] == "gemini-3.8-flash"
-    assert t["model"]["prompt_version"] == "v2.0"
+    assert t["model"]["name"] == models.model_label()
+    assert t["model"]["prompt_version"] == agent.PROMPT_VERSION
     assert t["prompt"]["user_prompt"] == "Check REQ-2.1 against the code"
     assert t["prompt"]["char_count"] == len("Check REQ-2.1 against the code")
     assert t["outcome"]["final_answer"] == "Requirement REQ-2.1 verified."

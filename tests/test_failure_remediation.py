@@ -95,7 +95,7 @@ def test_remediation_fail04_unauthorized_issue_filing_blocked():
 
 def test_remediation_fail05_max_hops_and_proposals_bounded():
     from src.workflow import MAX_PROPOSALS
-    from src.tool_calling import MAX_HOPS
+    from src.guard_middleware import MAX_HOPS
 
     # Verify hard bounds preventing infinite loops and runaway quotas
     assert MAX_PROPOSALS <= 2

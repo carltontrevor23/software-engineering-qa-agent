@@ -29,6 +29,7 @@ import approval
 import guardrails
 import memory
 import qa_tools
+import tracer
 import workflow
 from agent_state import InspectraState
 from agent_tools import TOOLS_BY_NAME
@@ -85,6 +86,24 @@ def blocked_reason(state: Dict[str, Any], tool_call: Dict[str, Any]) -> Optional
     return workflow.check_call(workflow.from_state(state), name, dict(tool_call.get("args", {})))
 
 
+def _record_rejections(messages: List[Any], rejected_results: List[Any]) -> None:
+    """Tell the tracer which high-impact calls the human rejected."""
+    calls = {c.get("id"): c for m in messages if isinstance(m, AIMessage) for c in m.tool_calls}
+    for message in rejected_results:
+        if message.name in approval.HIGH_IMPACT_TOOLS and _text(message.content).startswith(REJECTED_PREFIX):
+            call = calls.get(message.tool_call_id, {})
+            tracer.record_approval_event(message.name, dict(call.get("args", {})), "REJECTED")
+
+
+def refused_update(refusal: ToolMessage) -> Any:
+    """What the tool node returns for a refused call. A refused call ends the run as a tool
+    error (so it is not mislabelled later); a call skipped only for being a second call in the
+    same step changes no state, because the first call's result already carries it."""
+    if SKIPPED_MESSAGE in _text(refusal.content):
+        return refusal
+    return Command(update={"messages": [refusal], "stop_reason": "tool_error"})
+
+
 def _result_message(tool_call: Dict[str, Any], result: Dict[str, Any], status: str) -> ToolMessage:
     return ToolMessage(
         content=json.dumps(result), tool_call_id=tool_call["id"], name=tool_call["name"], status=status
@@ -95,13 +114,14 @@ def pre_call(state: Dict[str, Any], tool_call: Dict[str, Any]) -> Tuple[Optional
     """Returns (refusal, args). A refusal is a ToolMessage and the tool must not run."""
     reason = blocked_reason(state, tool_call)
     if reason:
-        guardrails.record("tool_blocked", tool=tool_call["name"], reason=reason)
+        guardrails.record("tool_call_blocked", tool=tool_call["name"], reason=reason)
         return _result_message(tool_call, {"status": "error", "error": reason}, "error"), {}
     args = dict(tool_call.get("args", {}))
     if approval.is_high_impact(tool_call["name"]):
         # The human approved this exact call in HumanInTheLoopMiddleware (it runs first);
         # mint the signed single-use token the tool itself checks.
         args.pop("approval_token", None)
+        tracer.record_approval_event(tool_call["name"], args, "APPROVED")
         args["approval_token"] = approval.create_approval_token(tool_call["name"], args)
     return None, args
 
@@ -123,7 +143,7 @@ def post_call(state: Dict[str, Any], tool_call: Dict[str, Any], message: Any) ->
     name = tool_call["name"]
     result = parse_result(message)
     wf = workflow.from_state(state)
-    changes = workflow.apply_result(wf, name, result)
+    changes = {"stop_reason": None, **workflow.apply_result(wf, name, result)}
     wf.update(changes)
 
     content, redactions = guardrails.redact(_text(message.content))
@@ -225,6 +245,7 @@ class InspectraGuard(AgentMiddleware[InspectraState]):
         if rejected and wf["phase"] not in workflow.TERMINAL_PHASES:
             updates = {"phase": workflow.STOPPED, "stop_reason": "human_rejection"}
             wf.update(updates)
+            _record_rejections(state.get("messages", []), recent)
         if state.get("hops", 0) >= MAX_HOPS:
             updates.update(workflow.finalize_on_hop_limit(wf))
             wf.update(updates)
@@ -264,7 +285,7 @@ class InspectraGuard(AgentMiddleware[InspectraState]):
     def wrap_tool_call(self, request: ToolCallRequest, handler: Any) -> Any:
         refusal, args = pre_call(request.state, request.tool_call)
         if refusal:
-            return refusal
+            return refused_update(refusal)
         message = handler(request.override(tool_call={**request.tool_call, "args": args}))
         return post_call(request.state, request.tool_call, message)
 
@@ -273,6 +294,6 @@ class InspectraGuard(AgentMiddleware[InspectraState]):
         # off the event loop.
         refusal, args = await asyncio.to_thread(pre_call, request.state, request.tool_call)
         if refusal:
-            return refusal
+            return refused_update(refusal)
         message = await handler(request.override(tool_call={**request.tool_call, "args": args}))
         return await asyncio.to_thread(post_call, request.state, request.tool_call, message)

@@ -38,6 +38,8 @@ def execute_tools(state: dict) -> dict:
         refusal, args = guard_middleware.pre_call(current, call)
         if refusal:
             messages.append(refusal)
+            if guard_middleware.SKIPPED_MESSAGE not in refusal.content:
+                changes["stop_reason"] = "tool_error"
             continue
         try:
             result: Any = TOOLS_BY_NAME[call["name"]].invoke(args)
