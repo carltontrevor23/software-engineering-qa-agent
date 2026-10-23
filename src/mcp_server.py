@@ -5,10 +5,10 @@ MCP server exposing the Inspectra QA tools (Week 6, realigned).
 Spec: docs/architecture/mcp_interface_spec.md
 
 It reuses the agent's own controls instead of re-implementing them:
-  - tool_calling._run_one_tool(): allow-list, test-run history + advisory printed
+  - tool_runner.run_one_tool(): allow-list, test-run history + advisory printed
     for the human, the console approval gate, and the signed single-use token;
   - workflow.check_call()/apply_result(): the same phase guard and file pinning
-    as the LangGraph agent, kept per server session (one requirement at a time);
+    as the LangGraph agent (guard_middleware.py), kept per server session (one requirement at a time);
   - sandbox.py rules inside run_tests.
 
 Clients can never supply approval tokens; approval happens on this console.
@@ -30,7 +30,7 @@ from mcp.server.fastmcp import FastMCP
 
 import guardrails
 import qa_tools
-import tool_calling
+import tool_runner
 import workflow
 
 mcp = FastMCP("inspectra-qa")
@@ -58,10 +58,10 @@ def _call(tool_name: str, args: Dict[str, Any]):
     if blocked:
         guardrails.record("tool_call_blocked", tool=tool_name, reason=blocked)
         return {"status": "error", "error": blocked, "phase": _session["phase"]}
-    result = tool_calling._run_one_tool(tool_name, dict(args), requirement_id=_session["requirement_id"])
+    result = tool_runner.run_one_tool(tool_name, dict(args), requirement_id=_session["requirement_id"])
     _session.update(workflow.apply_result(_session, tool_name, result))
     key = _session["requirement_id"] or qa_tools.requirement_id_from_args(args)
-    tool_calling._record(key, tool_name, result, 0)
+    tool_runner.record(key, tool_name, result, 0)
     payload = {**result, "phase": _session["phase"]} if isinstance(result, dict) else result
     return _redact_payload(payload)
 

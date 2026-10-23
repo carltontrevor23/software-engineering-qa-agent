@@ -6,11 +6,15 @@ Explicit workflow state for one QA run (Week 6, realigned).
 The phase machine decides which tools are allowed next, and pins run_tests,
 file_issue and save_test_to_suite to the exact files produced earlier in the
 same run. Fields are updated only from tool results, never from LLM text.
-Used by the LangGraph agent (tool_calling.py) and the MCP server (mcp_server.py).
+Used by the LangGraph agent (guard_middleware.py) and the MCP server (mcp_server.py).
+
+Follow-ups: a later message in the same thread may continue a finished run (save the
+tests, refine them, ask about the code) through carry_over(); anything else starts fresh.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -27,17 +31,19 @@ PHASES = (START, REQUIREMENT_RESOLVED, TESTS_PROPOSED, TESTS_RUN_PASSED,
 TERMINAL_PHASES = (DONE, STOPPED)
 
 ALLOWED_TOOLS_BY_PHASE = {
-    START: {"search_requirements", "propose_tests"},
-    REQUIREMENT_RESOLVED: {"propose_tests", "search_requirements"},
+    START: {"search_requirements", "propose_tests", "read_code"},
+    REQUIREMENT_RESOLVED: {"propose_tests", "search_requirements", "read_code"},
     TESTS_PROPOSED: {"run_tests"},
-    TESTS_RUN_PASSED: {"save_test_to_suite"},
-    TESTS_RUN_FAILED: {"draft_issue", "propose_tests"},
+    TESTS_RUN_PASSED: {"save_test_to_suite", "refine_tests", "read_code"},
+    TESTS_RUN_FAILED: {"draft_issue", "propose_tests", "refine_tests", "read_code"},
     ISSUE_DRAFTED: {"file_issue"},
     DONE: set(),
     STOPPED: set(),
 }
 # One initial proposal plus one regenerate after a failed run.
 MAX_PROPOSALS = 2
+# Proposals plus refinements per thread (a refinement writes a new test file like a proposal).
+MAX_TEST_VERSIONS = 5
 
 FIELDS = ("requirement_id", "phase", "test_file", "test_outcome", "draft_path",
           "stop_reason", "proposals_made")
@@ -77,7 +83,11 @@ def check_call(wf: Dict[str, Any], tool_name: str, args: Dict[str, Any]) -> Opti
         return f"Tool {tool_name} is not allowed in phase {phase}."
     if tool_name == "propose_tests" and phase == TESTS_RUN_FAILED and wf["proposals_made"] >= MAX_PROPOSALS:
         return f"Tool propose_tests is not allowed in phase {phase}: tests were already regenerated once."
-    if tool_name in ("run_tests", "save_test_to_suite") and not _same_file(args.get("test_file"), wf["test_file"]):
+    if tool_name == "refine_tests" and wf["proposals_made"] >= MAX_TEST_VERSIONS:
+        return f"Tool refine_tests is not allowed: {MAX_TEST_VERSIONS} test versions were already written."
+    if tool_name in ("run_tests", "save_test_to_suite", "refine_tests") and not _same_file(
+        args.get("test_file"), wf["test_file"]
+    ):
         return f"{tool_name} may only use the test file proposed in this run ({wf['test_file']})."
     if tool_name == "file_issue" and not _same_file(args.get("draft_path"), wf["draft_path"]):
         return f"file_issue may only file the draft written in this run ({wf['draft_path']})."
@@ -100,7 +110,7 @@ def apply_result(wf: Dict[str, Any], tool_name: str, result: Any) -> Dict[str, A
             return {"phase": STOPPED, "stop_reason": "requirement_not_found"}
         return {"phase": STOPPED, "stop_reason": "tool_error"}
 
-    if tool_name == "propose_tests":
+    if tool_name in ("propose_tests", "refine_tests"):
         if status == "success":
             return {"phase": TESTS_PROPOSED, "requirement_id": result.get("requirement_id"),
                     "test_file": result.get("test_file"), "test_outcome": None,
@@ -131,7 +141,7 @@ def apply_result(wf: Dict[str, Any], tool_name: str, result: Any) -> Dict[str, A
 
     if tool_name == "save_test_to_suite":
         if status == "success":
-            return {"phase": DONE}
+            return {"phase": DONE, "stop_reason": "tests_saved"}
         if status == "approval_required":
             return {"phase": STOPPED, "stop_reason": "human_rejection"}
         return {"phase": STOPPED, "stop_reason": "tool_error"}
@@ -157,3 +167,24 @@ def finalize_on_hop_limit(wf: Dict[str, Any]) -> Dict[str, Any]:
     if wf["phase"] in TERMINAL_PHASES:
         return {}
     return {"phase": STOPPED, "stop_reason": "hop_budget_exhausted"}
+
+
+_REQUIREMENT_MENTION_RE = re.compile(r"REQ-\d+(?:\.\d+)*", re.I)
+_CARRY_PHASES = {"all_tests_passed": TESTS_RUN_PASSED, "test_defect_reported": TESTS_RUN_FAILED}
+
+
+def carry_over(state: Dict[str, Any], request_text: str) -> Optional[Dict[str, Any]]:
+    """Workflow fields for a follow-up message, or None when the message starts a fresh run.
+
+    Only a run that ended with tests that passed, or with a test judged wrong, can be continued,
+    and only by a message that names no requirement: naming one (even the same one) means
+    "check it", which starts over. The test file stays pinned, so a follow-up can act only on
+    the tests the previous run produced. Human approval is still asked for every save.
+    """
+    previous = from_state(state)
+    if previous["phase"] != DONE or not previous["test_file"] or not previous["requirement_id"]:
+        return None
+    phase = _CARRY_PHASES.get(previous["stop_reason"])
+    if phase is None or _REQUIREMENT_MENTION_RE.search(request_text or ""):
+        return None
+    return {**previous, "phase": phase, "stop_reason": None, "draft_path": None}

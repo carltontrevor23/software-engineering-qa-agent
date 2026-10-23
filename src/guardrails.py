@@ -64,6 +64,18 @@ def validate_request(prompt: Any) -> Tuple[bool, str]:
     return True, "ok"
 
 
+MAX_INSTRUCTION_CHARS = 500
+
+
+def check_instruction(instruction: Any) -> Optional[str]:
+    """Error message if a refine_tests instruction is empty or too long, else None."""
+    if not isinstance(instruction, str) or not clean_text(instruction).strip():
+        return "Refinement instruction is empty."
+    if len(instruction) > MAX_INSTRUCTION_CHARS:
+        return f"Refinement instruction is longer than {MAX_INSTRUCTION_CHARS} characters."
+    return None
+
+
 def check_requirement_id(requirement_id: Any) -> Optional[str]:
     """Error message if requirement_id is not of the form REQ-<n>.<n>, else None."""
     if not isinstance(requirement_id, str) or not REQUIREMENT_ID_RE.match(requirement_id):
@@ -106,9 +118,10 @@ def single_line(text: str) -> str:
 
 # Output validation: secret redaction
 
-SECRET_ENV_VARS = ("GEMINI_API_KEY", "GITHUB_TOKEN", "APPROVAL_SECRET_KEY", "LANGSMITH_API_KEY")
+SECRET_ENV_VARS = ("GEMINI_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "APPROVAL_SECRET_KEY", "LANGSMITH_API_KEY")
 SECRET_PATTERNS = (
     re.compile(r"AIza[0-9A-Za-z_\-]{20,}"),            # Google API keys
+    re.compile(r"gsk_[0-9A-Za-z]{20,}"),                # Groq API keys
     re.compile(r"gh[pousr]_[0-9A-Za-z]{20,}"),          # GitHub classic tokens
     re.compile(r"github_pat_[0-9A-Za-z_]{20,}"),        # GitHub fine-grained tokens
     re.compile(r"lsv2_[0-9A-Za-z_]{20,}"),              # LangSmith keys

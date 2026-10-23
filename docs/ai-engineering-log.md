@@ -111,3 +111,27 @@ and what a team member must review before the change is accepted.
 - **Verified by the agent:** `python -m pytest tests/ sut/tests/ -v` passes (150 passed, 1 skipped) with a clean `git status` on `evidence/traces/agent_traces.jsonl`, and all 6 defect fixes verified via direct execution checks.
 - **A human must review:**
   - `evidence/week8_defect_fixes_and_known_limitations.md` and the `Known Limitations` section in `README.md` prior to the final presentation.
+
+## Week 8 - Move to create_agent, middleware and LangGraph Studio (2026-10-22)
+
+- **Task:** Restructure the agent into the idiom taught in the AI engineering course so it runs and can be tested in LangGraph Studio.
+- **AI use:** Claude Code did the migration from `skills.md` / `skills/studio-migration`. Files changed or added:
+  - `src/agent.py`, `src/agent_state.py`, `src/agent_tools.py`, `src/guard_middleware.py`, `src/models.py`, `src/offline.py`, `src/tool_runner.py`, `studio/graph.py`, `langgraph.json`
+  - removed `src/tool_calling.py` and `src/capture_week5_traces.py` (replaced by `src/capture_traces.py`)
+- **What stayed deterministic:** phase machine, file pinning, hop budget (7), one tool call per step, secret redaction, unbacked-claim check. They now run as `InspectraGuard` middleware; human approval is `HumanInTheLoopMiddleware` (approve or reject only).
+- **Checked by a human:** offline graph approve and reject paths on a real `langgraph dev` server; the full test suite; one live Gemini run (REQ-2.1, tests passed).
+- **Not yet done:** Groq path untested (no key); sandbox hardening; 42-scenario re-run on the new graph.
+
+### Week 8 addendum - configurable project and follow-ups (2026-10-22)
+
+- **Task:** make the agent work on any project (paths as operator settings) and allow follow-up turns.
+- **AI use:** Claude Code added `src/project_config.py` (INSPECTRA_REQUIREMENTS_DIR, INSPECTRA_CODE_DIR, INSPECTRA_CODE_MODULES), the `read_code` and `refine_tests` tools, `workflow.carry_over()` for follow-ups, prompt v2.1 and `prompts/v1.2_refine_tests.txt`, the offline graph `inspectra_offline_pass`, and a Groq key pattern in the redaction list.
+- **Design choices a human should review:** a follow-up continues only after a passed run (or a test judged wrong) and only if the message names no requirement; saves still need human approval; read_code is limited to `.py` files inside the code folder.
+- **Tested:** 192 tests pass (`tests/test_project_config.py`, `tests/test_followups.py`). Not yet tested live: follow-ups with Groq or Gemini, and the second sample project (a Gemini 503 and a DNS failure interrupted those runs).
+
+### Week 8 addendum - Groq test writer and deployment check (2026-10-23)
+
+- **Task:** make the agent deployable and testable before deployment.
+- **AI use:** Claude Code added `pyproject.toml` and `.dockerignore` (a `langgraph build` failed because the top-level `src/` folder is a reserved package name), split `requirements.txt` from `requirements-dev.txt`, removed the hardcoded approval secret (a random per-process key is used when `APPROVAL_SECRET_KEY` is unset), added prompt v2.2, and added `INSPECTRA_TEST_WRITER=groq` after a Gemini ping took 203 s.
+- **Found by testing:** Groq returned an empty reply for the test-writing prompt because its default 2048-token cap was used up by reasoning; `max_tokens` is now 8000 and the writer uses `reasoning_effort="low"`. A refinement of "negative balance" was first refused as ungrounded; the refine prompt now treats cases the requirement's rules determine as grounded.
+- **Tested:** the Docker image builds, contains no `.env`, and loads all three graphs. Real Groq flow on REQ-2.1: propose (4 tests, passed), refine (5 tests, passed). One earlier run wrote a test that failed on correct code, so a model-written test can be wrong; the agent's code-defect or test-defect judgement and the human approval step exist for that.

@@ -14,7 +14,7 @@ Validates:
 import os
 import json
 import pytest
-# Use the memory module tests/conftest.py isolates (the one tool_calling imports),
+# Use the memory module tests/conftest.py isolates (the one the agent imports),
 # so these tests never touch the real data/memory file.
 import memory
 from memory import record_case, get_case_history
@@ -26,8 +26,10 @@ from src.approval import (
     set_approval_hook,
     _CONSUMED_NONCES,
 )
-from src import tool_calling
-from src.tool_calling import AgentState
+import agent_tools
+import qa_tools
+import workflow
+from agent_state import InspectraState
 
 
 @pytest.fixture(autouse=True)
@@ -115,14 +117,13 @@ def test_history_full_of_approvals_cannot_bypass_file_issue_gate(tmp_path, monke
     However many earlier filings and passing runs memory holds, file_issue without
     a fresh human-approved token is still refused and files nothing.
     """
-    qa_tools = tool_calling.qa_tools
     monkeypatch.setattr(qa_tools, "ISSUES_DIR", tmp_path / "issues")
     draft = qa_tools.draft_issue("REQ-2.1", "t", "s", ["test_x"])["draft_path"]
     for hops in range(10):
         record_case("REQ-2.1", "file_issue", "success", hops=hops)
         record_case("REQ-2.1", "run_tests", "success", hops=hops, test_outcome="passed", failed_count=0)
 
-    res = tool_calling.file_issue.invoke({"draft_path": draft})
+    res = agent_tools.file_issue.invoke({"draft_path": draft})
     assert res["status"] == "approval_required"
     assert not (tmp_path / "issues" / "filed").exists()
 
@@ -130,10 +131,11 @@ def test_history_full_of_approvals_cannot_bypass_file_issue_gate(tmp_path, monke
 def test_memory_not_in_llm_state():
     """
     BOUNDARY TEST:
-    AgentState holds messages, hops and the workflow fields only. There is no
-    field through which case history could be injected into state or the LLM.
+    InspectraState holds messages, hops and the workflow fields only (plus the framework's
+    own jump_to / structured_response). There is no field through which case history could
+    be injected into state or the LLM.
     """
-    fields = set(AgentState.__annotations__) | {"messages"}
-    assert fields == {"messages", "hops", "requirement_id", "phase", "test_file",
-                      "test_outcome", "draft_path", "stop_reason", "proposals_made"}
+    fields = set(InspectraState.__annotations__)
+    assert {"messages", "hops", *workflow.FIELDS} <= fields
+    assert fields - {"messages", "hops", *workflow.FIELDS} <= {"jump_to", "structured_response"}
     assert not {"case_history", "memory", "history"} & fields

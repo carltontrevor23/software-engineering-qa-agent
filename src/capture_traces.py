@@ -1,7 +1,7 @@
 """
-src/capture_week5_traces.py
+src/capture_traces.py
 
-Week 5 (realigned): capture three execution traces of the bounded QA agent.
+Week 8: capture three execution traces of the QA agent (create_agent graph, as served in Studio).
 
   T1  REQ-2.1 on the correct SUT. Whatever really happens is recorded: a pass, or a
       "test defect" if a generated test is wrong.
@@ -9,15 +9,16 @@ Week 5 (realigned): capture three execution traces of the bounded QA agent.
   T3  Failure/recovery: same as T2, but the human REJECTS file_issue. The agent stops
       with human_rejection and nothing new appears in evidence/issues/filed/.
 
-Each scenario runs against the live Gemini model. Only if a live run fails (quota,
-network, key) is it re-run with the scripted LLM; the mode used is recorded per trace.
-Approvals use approval.set_approval_hook, and every decision is logged.
+Each scenario runs against the live model (INSPECTRA_MODEL). Only if a live run fails
+(quota, network, key) is it re-run with the scripted model; the mode used is recorded per
+trace. Approvals are the same approve/reject decisions a human gives on the Studio card,
+and every decision is logged.
 
 Outputs:
-  - evidence/traces/week5_live_traces.jsonl
-  - evidence/week5_live_execution_traces.md
+  - evidence/traces/week8_traces.jsonl
+  - evidence/week8_execution_traces.md
 
-Run:  python src/capture_week5_traces.py
+Run:  python src/capture_traces.py
 """
 
 from __future__ import annotations
@@ -31,16 +32,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 sys.path.insert(0, os.path.dirname(__file__))
 
-import approval
+import agent
 import demo_support
+import guard_middleware
+import models
+import offline
 import qa_tools
-import tool_calling
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-TRACES_JSONL_PATH = ROOT_DIR / "evidence" / "traces" / "week5_live_traces.jsonl"
-TRACES_MD_PATH = ROOT_DIR / "evidence" / "week5_live_execution_traces.md"
+TRACES_JSONL_PATH = ROOT_DIR / "evidence" / "traces" / "week8_traces.jsonl"
+TRACES_MD_PATH = ROOT_DIR / "evidence" / "week8_execution_traces.md"
 PROMPT = "Check REQ-2.1 (Tier Upgrades) against the code."
 
 SCENARIOS = [
@@ -56,64 +61,52 @@ SCENARIOS = [
 ]
 
 
-@contextlib.contextmanager
-def _swap(module: Any, name: str, value: Any):
-    saved = getattr(module, name)
-    setattr(module, name, value)
-    try:
-        yield
-    finally:
-        setattr(module, name, saved)
-
-
 def _filed() -> set:
     folder = qa_tools.ISSUES_DIR / "filed"
     return {p.name for p in folder.glob("*.md")} if folder.exists() else set()
 
 
-def run_scenario(scenario: Dict[str, Any], offline: bool) -> Dict[str, Any]:
+def run_scenario(scenario: Dict[str, Any], offline_mode: bool) -> Dict[str, Any]:
     approvals: List[Dict[str, Any]] = []
 
-    def hook(tool_name: str, arguments: Dict[str, Any]) -> bool:
-        decision = scenario["approve"]
+    def decide(action: Dict[str, Any]) -> Dict[str, Any]:
+        approved = scenario["approve"]
         approvals.append({
-            "tool_name": tool_name,
-            "arguments": arguments,
-            "decision": "APPROVED" if decision else "REJECTED",
+            "tool_name": action["name"],
+            "arguments": action["args"],
+            "decision": "APPROVED" if approved else "REJECTED",
             "time_utc": datetime.now(timezone.utc).isoformat(),
         })
-        print(f"  --> HUMAN GATE: {tool_name} -> {'APPROVED' if decision else 'REJECTED'}")
-        return decision
+        print(f"  --> HUMAN GATE: {action['name']} -> {'APPROVED' if approved else 'REJECTED'}")
+        if approved:
+            return {"type": "approve"}
+        return {"type": "reject", "message": "Action rejected by human operator."}
 
     filed_before = _filed()
     started = datetime.now(timezone.utc).isoformat()
     with contextlib.ExitStack() as stack:
-        approval.set_approval_hook(hook)
-        stack.callback(approval.set_approval_hook, None)
-        if offline:
-            stack.enter_context(_swap(tool_calling, "llm_with_tools", demo_support.ScriptedLLM()))
-            stack.enter_context(_swap(qa_tools, "get_model_response", demo_support.fixture_model_reply))
-        if scenario["planted_bug"]:
-            stack.enter_context(demo_support.planted_bug_sut())
+        if offline_mode:
+            graph = offline.build_offline_agent(planted_bug=scenario["planted_bug"], checkpointer=InMemorySaver())
+        else:
+            graph = agent.build_agent(checkpointer=InMemorySaver())
+            if scenario["planted_bug"]:
+                stack.enter_context(demo_support.planted_bug_sut())
         final_state, steps = demo_support.trace_run(
-            tool_calling.graph, PROMPT, printer=lambda s: print("  " + s),
-            initial_state=tool_calling.initial_state(PROMPT),
+            graph, PROMPT, printer=lambda s: print("  " + s), decide=decide,
         )
 
-    replies = [m for m in final_state["messages"]
-               if type(m).__name__ == "AIMessage" and m.content and not m.tool_calls]
-    answer = demo_support._text(replies[-1].content).strip() if replies else tool_calling.STOPPED_MESSAGE
+    answer = agent.final_text(final_state).strip()
     newly_filed = sorted(_filed() - filed_before)
     return {
         "scenario_id": scenario["id"],
         "title": scenario["title"],
         "description": scenario["description"],
-        "mode": "offline_scripted_llm" if offline else "live_gemini",
-        "model": "ScriptedLLM + demo/fixtures/req_2_1_tests.py" if offline else tool_calling.MODEL_NAME,
-        "prompt_version": tool_calling.PROMPT_VERSION,
+        "mode": "offline_scripted_llm" if offline_mode else "live_model",
+        "model": "ScriptedLLM + demo/fixtures/req_2_1_tests.py" if offline_mode else models.model_label(),
+        "prompt_version": agent.PROMPT_VERSION,
         "prompt": PROMPT,
         "planted_bug": scenario["planted_bug"],
-        "max_hops": tool_calling.MAX_HOPS,
+        "max_hops": guard_middleware.MAX_HOPS,
         "total_hops": final_state.get("hops", 0),
         "start_time_utc": started,
         "end_time_utc": datetime.now(timezone.utc).isoformat(),
@@ -131,10 +124,10 @@ def capture(scenario: Dict[str, Any]) -> Dict[str, Any]:
     print(f"[{scenario['id']}] {scenario['title']}")
     print("=" * 76)
     try:
-        return run_scenario(scenario, offline=False)
+        return run_scenario(scenario, offline_mode=False)
     except Exception as e:  # live model failed: record why, then fall back
         print(f"  Live run failed ({type(e).__name__}: {e}). Re-running with the scripted LLM.")
-        record = run_scenario(scenario, offline=True)
+        record = run_scenario(scenario, offline_mode=True)
         record["live_failure"] = f"{type(e).__name__}: {e}"
         record["live_failure_traceback"] = traceback.format_exc(limit=3)
         return record
@@ -148,15 +141,15 @@ def _cell(value: Any) -> str:
 
 def write_markdown(records: List[Dict[str, Any]]) -> None:
     lines = [
-        "# Week 5 (realigned): Bounded QA Agent Execution Traces",
+        "# Week 8: QA Agent Execution Traces (create_agent graph)",
         "",
         f"**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  ",
-        f"**Agent prompt:** `prompts/agent_system_prompt_{tool_calling.PROMPT_VERSION}.txt`  ",
-        f"**Limits:** `MAX_HOPS = {tool_calling.MAX_HOPS}`, `MAX_CALLS_PER_STEP = {tool_calling.MAX_CALLS_PER_STEP}`  ",
-        "**Script:** `src/capture_week5_traces.py` (structured records in `evidence/traces/week5_live_traces.jsonl`)",
+        f"**Agent prompt:** `prompts/agent_system_prompt_{agent.PROMPT_VERSION}.txt`  ",
+        f"**Limits:** `MAX_HOPS = {guard_middleware.MAX_HOPS}`, `MAX_CALLS_PER_STEP = {guard_middleware.MAX_CALLS_PER_STEP}`  ",
+        "**Script:** `src/capture_traces.py` (structured records in `evidence/traces/week8_traces.jsonl`)",
         "",
         "Each trace shows, per hop, the graph node, the tool and its arguments, the tool's `status` / "
-        "`test_outcome`, and the latency since the previous step. `mode` says whether the live Gemini "
+        "`test_outcome`, and the latency since the previous step. `mode` says whether the live "
         "model or the offline scripted LLM produced the decisions.",
         "",
         "| Trace | Mode | Tool sequence | Approval | Filed | Stop reason |",
@@ -215,7 +208,7 @@ def write_markdown(records: List[Dict[str, Any]]) -> None:
 
 
 def main() -> int:
-    print(f"Model: {tool_calling.MODEL_NAME} | prompt {tool_calling.PROMPT_VERSION} | MAX_HOPS {tool_calling.MAX_HOPS}")
+    print(f"Model: {models.model_label()} | prompt {agent.PROMPT_VERSION} | MAX_HOPS {guard_middleware.MAX_HOPS}")
     records = [capture(s) for s in SCENARIOS]
     TRACES_JSONL_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(TRACES_JSONL_PATH, "w", encoding="utf-8") as f:

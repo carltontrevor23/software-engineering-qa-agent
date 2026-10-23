@@ -6,20 +6,21 @@ script (src/capture_week5_traces.py) and the agent tests:
 
   - planted_bug_sut(): run against a temporary SUT copy with one planted defect.
     The real sut/ folder is never modified.
-  - ScriptedLLM: an offline stand-in for Gemini that follows the agent rules
+  - ScriptedLLM: an offline stand-in for the live model that follows the agent rules
     deterministically. Every message it writes starts with "[SCRIPTED LLM]".
   - fixture_model_reply(): the hand-written REQ-2.1 tests, returned in place of
     the model's propose_tests reply in offline mode.
   - trace_run() / stop_reason(): stream one graph run, record a compact per-hop
     trace and classify why it stopped.
 
-This module does not import tool_calling, so callers pass in the graph and
-patch the LLM on whichever tool_calling module object they use.
+This module does not import the agent, so callers pass in the graph (see agent.py and
+offline.py).
 """
 
 from __future__ import annotations
 
 import ast
+import json
 import re
 import shutil
 import tempfile
@@ -49,22 +50,27 @@ SUT_FILE = Path("subscription_service") / "subscription_manager.py"
 def planted_bug_sut() -> Iterator[Path]:
     """Copy the SUT to a temp folder, plant the boundary bug there, and point the
     sandbox at the copy for the duration of the block."""
+    import project_config
+    import qa_tools
+
     tmp_root = Path(tempfile.mkdtemp(prefix="inspectra_planted_"))
     copy = tmp_root / "sut"
-    shutil.copytree(sandbox.SUT_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
+    # The planted bug belongs to the bundled sample, whatever project .env points at.
+    shutil.copytree(project_config.DEFAULT_CODE_DIR, copy, ignore=shutil.ignore_patterns("__pycache__"))
     target = copy / SUT_FILE
     source = target.read_text(encoding="utf-8")
     count = source.count(PLANTED_BUG_FROM)
     assert count == 1, f"Expected exactly one '{PLANTED_BUG_FROM}' in the SUT, found {count}."
     target.write_text(source.replace(PLANTED_BUG_FROM, PLANTED_BUG_TO), encoding="utf-8")
 
-    saved = (sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS)
+    saved = (sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS, qa_tools.REQUIREMENTS_DIR)
+    qa_tools.REQUIREMENTS_DIR = project_config.DEFAULT_REQUIREMENTS_DIR
     sandbox.SUT_DIR = copy
     sandbox.ALLOWED_TEST_DIRS = [sandbox.GENERATED_DIR, copy / "tests"]
     try:
         yield copy
     finally:
-        sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS = saved
+        sandbox.SUT_DIR, sandbox.ALLOWED_TEST_DIRS, qa_tools.REQUIREMENTS_DIR = saved
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
@@ -79,11 +85,15 @@ def fixture_model_reply(*_args: Any, **_kwargs: Any) -> str:
 # ---------------------------------------------------------------------
 
 def _parse_result(content: Any) -> Dict[str, Any]:
-    try:
-        value = ast.literal_eval(str(content))
+    """A tool result as a dict: JSON (what the agent's tool node produces) or a Python repr."""
+    text = _text(content)
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            value = parse(text)
+        except (ValueError, SyntaxError):
+            continue
         return value if isinstance(value, dict) else {}
-    except (ValueError, SyntaxError):
-        return {}
+    return {}
 
 
 class ScriptedLLM:
@@ -108,12 +118,42 @@ class ScriptedLLM:
     def _answer(text: str) -> AIMessage:
         return AIMessage(content=f"{SCRIPTED_LABEL} {text}")
 
+    @staticmethod
+    def _earlier_test_file(earlier: List[Any]) -> Optional[Dict[str, Any]]:
+        """The latest propose_tests/refine_tests result of a previous turn."""
+        for message in reversed(earlier):
+            if isinstance(message, ToolMessage) and message.name in ("propose_tests", "refine_tests"):
+                result = _parse_result(message.content)
+                if result.get("test_file"):
+                    return result
+        return None
+
+    def _follow_up(self, request_text: str, earlier: List[Any]) -> Optional[AIMessage]:
+        """A message that names no requirement, after an earlier run in the same thread."""
+        previous = self._earlier_test_file(earlier)
+        if previous is None or re.search(r"REQ-\d", request_text, re.I):
+            return None
+        lowered = request_text.lower()
+        if "save" in lowered:
+            return self._tool_call("save_test_to_suite", {"test_file": previous["test_file"]})
+        if re.search(r"\b(add|refine|change|more|another|extend)\b", lowered):
+            return self._tool_call("refine_tests", {
+                "requirement_id": previous["requirement_id"], "test_file": previous["test_file"],
+                "instruction": request_text,
+            })
+        return self._tool_call("read_code", {})
+
     def invoke(self, messages: List[Any]) -> AIMessage:
-        request = next((m for m in messages if isinstance(m, HumanMessage)), None)
+        last_human = max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=None)
+        request = messages[last_human] if last_human is not None else None
         request_text = str(request.content) if request else ""
-        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        this_turn = messages[last_human + 1:] if last_human is not None else messages
+        tool_messages = [m for m in this_turn if isinstance(m, ToolMessage)]
 
         if not tool_messages:
+            follow_up = self._follow_up(request_text, messages[: last_human or 0])
+            if follow_up is not None:
+                return follow_up
             return self._tool_call("search_requirements", {"query": request_text})
 
         last = tool_messages[-1]
@@ -133,10 +173,26 @@ class ScriptedLLM:
                 return self._answer("No matching requirement was found, so no tests were proposed.")
             return self._tool_call("propose_tests", {"requirement_id": requirement_id})
 
-        if last.name == "propose_tests":
+        if last.name in ("propose_tests", "refine_tests"):
             return self._tool_call("run_tests", {
                 "requirement_id": result["requirement_id"], "test_file": result["test_file"],
             })
+
+        if last.name == "save_test_to_suite":
+            return self._answer(f"Approved and saved the tests to {result.get('saved_path')}.")
+
+        if last.name == "read_code":
+            if result.get("files") is not None:
+                files = result["files"]
+                if not files:
+                    return self._answer("The code folder has no source files to read.")
+                return self._tool_call("read_code", {"file": files[0]})
+            try:
+                names = [n.name for n in ast.parse(result.get("content", "")).body
+                         if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and not n.name.startswith("_")]
+            except SyntaxError:
+                names = []
+            return self._answer(f"I read {result.get('file')}. It defines: {', '.join(names) or 'no public names'}.")
 
         if last.name == "run_tests":
             requirement_id = result.get("requirement_id", "unknown")
@@ -197,52 +253,86 @@ def trace_run(
     prompt: str,
     printer: Optional[Callable[[str], None]] = print,
     initial_state: Optional[Dict[str, Any]] = None,
+    decide: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Run the graph once and return (final_state, steps).
 
     Each step records hop, node, tool, args, status/test_outcome, workflow phase and latency.
-    Pass tool_calling.initial_state(prompt) so the workflow fields start initialised.
+    The graph must have a checkpointer, so the run can pause for human approval. When it
+    does, decide(action_request) is called for each pending action and must return
+    {"type": "approve"} or {"type": "reject", "message": ...}; the run then resumes.
     """
-    state = initial_state or {"messages": [HumanMessage(content=prompt)], "hops": 0}
+    from uuid import uuid4
+
+    from langgraph.types import Command
+
+    state = initial_state or {"messages": [HumanMessage(content=prompt)]}
+    config = {"configurable": {"thread_id": uuid4().hex}}
+    payload: Any = state
     final_state: Dict[str, Any] = state
     steps: List[Dict[str, Any]] = []
+    seen_calls = set()
     hops = 0
     started = time.perf_counter()
 
-    for mode, chunk in graph.stream(state, stream_mode=["updates", "values"]):
-        if mode == "values":
-            final_state = chunk
-            continue
-        latency = round(time.perf_counter() - started, 2)
-        started = time.perf_counter()
-        for node, delta in chunk.items():
-            hops = delta.get("hops", hops)
-            phase = delta.get("phase")
-            for msg in delta.get("messages", []):
-                if isinstance(msg, AIMessage) and msg.tool_calls:
-                    call = msg.tool_calls[0]
-                    step = {"hop": hops, "node": node, "action": "call_tool", "tool": call["name"],
-                            "args": call["args"], "latency_s": latency}
-                    line = f"hop {hops} | {node:<13} | call {call['name']}({_short_args(call['args'])})"
-                elif isinstance(msg, AIMessage):
-                    step = {"hop": hops, "node": node, "action": "final_answer",
-                            "text": _text(msg.content).strip(), "latency_s": latency}
-                    line = f"hop {hops} | {node:<13} | final answer"
-                elif isinstance(msg, ToolMessage):
-                    result = _parse_result(msg.content)
-                    step = {"hop": hops, "node": node, "action": "tool_result", "tool": msg.name,
-                            "status": result.get("status"), "test_outcome": result.get("test_outcome"),
-                            "result": result or str(msg.content), "latency_s": latency}
-                    outcome = f" test_outcome={result['test_outcome']}" if result.get("test_outcome") else ""
-                    line = f"hop {hops} | {node:<13} | {msg.name} -> status={result.get('status')}{outcome}"
-                else:
+    while True:
+        interrupts = None
+        for mode, chunk in graph.stream(payload, config, stream_mode=["updates", "values"]):
+            if mode == "values":
+                final_state = chunk
+                continue
+            if "__interrupt__" in chunk:
+                interrupts = chunk["__interrupt__"]
+                continue
+            latency = round(time.perf_counter() - started, 2)
+            started = time.perf_counter()
+            for node, delta in chunk.items():
+                if not isinstance(delta, dict):
                     continue
-                if phase:
-                    step["phase"] = phase
-                    line += f" [phase {phase}]"
-                steps.append(step)
-                if printer:
-                    printer(f"{line}  ({latency}s)")
+                hops = delta.get("hops", hops)
+                phase = delta.get("phase")
+                for msg in delta.get("messages", []):
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        call = msg.tool_calls[0]
+                        if call["id"] in seen_calls:  # the approval hook re-emits the model message
+                            continue
+                        seen_calls.add(call["id"])
+                        step = {"hop": hops, "node": node, "action": "call_tool", "tool": call["name"],
+                                "args": call["args"], "latency_s": latency}
+                        line = f"hop {hops} | {node:<13} | call {call['name']}({_short_args(call['args'])})"
+                    elif isinstance(msg, AIMessage):
+                        step = {"hop": hops, "node": node, "action": "final_answer",
+                                "text": _text(msg.content).strip(), "latency_s": latency}
+                        line = f"hop {hops} | {node:<13} | final answer"
+                    elif isinstance(msg, ToolMessage):
+                        result = _parse_result(msg.content)
+                        step = {"hop": hops, "node": node, "action": "tool_result", "tool": msg.name,
+                                "status": result.get("status"), "test_outcome": result.get("test_outcome"),
+                                "result": result or str(msg.content), "latency_s": latency}
+                        outcome = f" test_outcome={result['test_outcome']}" if result.get("test_outcome") else ""
+                        line = f"hop {hops} | {node:<13} | {msg.name} -> status={result.get('status')}{outcome}"
+                    else:
+                        continue
+                    if phase:
+                        step["phase"] = phase
+                        line += f" [phase {phase}]"
+                    steps.append(step)
+                    if printer:
+                        printer(f"{line}  ({latency}s)")
+        if not interrupts:
+            break
+        if decide is None:
+            raise RuntimeError("The run paused for human approval but no decide() was given.")
+        decisions = []
+        for action in interrupts[0].value["action_requests"]:
+            decision = decide(action)
+            decisions.append(decision)
+            steps.append({"hop": hops, "node": "human", "action": "human_decision",
+                          "tool": action["name"], "decision": decision["type"]})
+            if printer:
+                printer(f"hop {hops} | {'human':<13} | {action['name']} -> {decision['type']}")
+        payload = Command(resume={"decisions": decisions})
+        started = time.perf_counter()
     return final_state, steps
 
 

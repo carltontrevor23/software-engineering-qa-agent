@@ -5,12 +5,12 @@ a runnable pytest module implementing those tests.
 
 Rules for the code block:
 1. Import the module under test exactly as shown in MODULE / CHANGE
-   (from subscription_service.subscription_manager import ...).
-2. Never make real network calls. Mock HTTP with
-   unittest.mock.patch("subscription_service.subscription_manager.requests.get").
-3. Never touch real files. Pass pytest's tmp_path as ledger_dir.
+   ("Import it in tests with: ..."). The first module is {{first_module}}.
+2. Never make real network calls. Mock HTTP where the module uses it, for example
+   unittest.mock.patch("{{first_module}}.requests.get") if it calls requests.get.
+3. Never touch real files. Use pytest's tmp_path for any file or folder the code accepts.
 4. Only import from: pytest, unittest, unittest.mock, json, os, tempfile, pathlib, requests,
-   subscription_service. Do not use subprocess, socket, shutil, eval, exec or os.system.
+   {{packages}}. Do not use subprocess, socket, shutil, eval, exec or os.system.
 5. Name every test function test_<behaviour> and add a one-line comment citing the
    acceptance criterion it checks.
 

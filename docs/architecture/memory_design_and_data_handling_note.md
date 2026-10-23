@@ -1,8 +1,8 @@
 # Memory Design and Data Handling Note — Week 6 (realigned)
 
 **Project:** Software-Engineering QA Agent (Inspectra)
-**Code:** [`src/memory.py`](../../src/memory.py); used in `_run_one_tool()` and `execute_tools()` in
-[`src/tool_calling.py`](../../src/tool_calling.py)
+**Code:** [`src/memory.py`](../../src/memory.py); used in `post_call()` and `approval_description()` in
+[`src/guard_middleware.py`](../../src/guard_middleware.py) (and `tool_runner.py` for the MCP server)
 **Tests:** [`tests/test_memory.py`](../../tests/test_memory.py), [`tests/test_memory_behavior.py`](../../tests/test_memory_behavior.py)
 **Evidence:** [`evidence/memory_evaluation_evidence.md`](../../evidence/memory_evaluation_evidence.md)
 

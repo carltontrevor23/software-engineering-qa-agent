@@ -51,15 +51,6 @@ load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3.8-flash")
 
-# Defer hard failure when GEMINI_API_KEY is absent so offline rehearsals (--offline)
-# and unit tests can import this module without requiring a live API key.
-client = genai.Client(api_key=API_KEY) if API_KEY else None
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-TRACES_DIR = PROJECT_ROOT / "evidence" / "traces"
-TRACES_DIR.mkdir(parents=True, exist_ok=True)
-
-
 # Custom exception
 class ModelCallError(Exception):
     """
@@ -70,6 +61,61 @@ class ModelCallError(Exception):
     def __init__(self, message: str, cause: Exception | None = None):
         super().__init__(message)
         self.cause = cause
+
+
+def _use_groq() -> bool:
+    """INSPECTRA_TEST_WRITER=groq sends test-writing prompts to Groq instead of Gemini."""
+    return os.getenv("INSPECTRA_TEST_WRITER", "").strip().lower() == "groq"
+
+
+def _groq_response(prompt: str, prompt_version: str, max_retries: int) -> str:
+    """The same contract as the Gemini path: text back, every call logged, ModelCallError on failure."""
+    import time
+
+    import models
+
+    try:
+        chat = models.get_chat_model("groq", reasoning_effort="low")  # writing tests needs little deliberation
+    except models.ModelConfigError as e:
+        raise ModelCallError(str(e), cause=e) from e
+    label = models.model_label("groq")
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 2):
+        try:
+            content = chat.invoke(prompt).content
+            text = content if isinstance(content, str) else "".join(
+                b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+            )
+            _log_call(prompt=prompt, prompt_version=prompt_version, response=text, model=label)
+            return text
+        except Exception as e:  # network, rate limit, server error: retry, then report
+            last_error = e
+            if attempt <= max_retries:
+                time.sleep(min(2 ** attempt * 2, 20))
+    _log_call(prompt=prompt, prompt_version=prompt_version, response=None, status="failed",
+              error=str(last_error), model=label)
+    raise ModelCallError(f"Model call failed after retries: {last_error}", cause=last_error)
+
+
+_client = None
+
+
+def _get_client():
+    """Create the Gemini client on first use, so importing this module never needs a key."""
+    global _client
+    if _client is None:
+        if not API_KEY:
+            raise ModelCallError(
+                "GEMINI_API_KEY not found. Create a .env file in the project "
+                "root with a line like: GEMINI_API_KEY=your_key_here"
+            )
+        _client = genai.Client(api_key=API_KEY)
+    return _client
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+TRACES_DIR = PROJECT_ROOT / "evidence" / "traces"
+TRACES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Core function (now with error handling + light retry)
@@ -111,25 +157,20 @@ def get_model_response(
     """
     import time
 
-    if not API_KEY or client is None:
-        msg = (
-            "GEMINI_API_KEY not found. Create a .env file in the project "
-            "root with a line like: GEMINI_API_KEY=your_key_here"
-        )
-        _log_call(
-            prompt=prompt,
-            prompt_version=prompt_version,
-            response=None,
-            status="failed",
-            error=msg,
-        )
-        raise ModelCallError(msg)
+    if _use_groq():
+        return _groq_response(prompt, prompt_version, max_retries)
+
+    try:
+        api = _get_client()
+    except ModelCallError as e:
+        _log_call(prompt=prompt, prompt_version=prompt_version, response=None, status="failed", error=str(e))
+        raise
 
     last_error: Exception | None = None
 
     for attempt in range(1, max_retries + 2):  # e.g. max_retries=3 -> 4 attempts
         try:
-            interaction = client.interactions.create(
+            interaction = api.interactions.create(
                 model=MODEL_NAME,
                 input=prompt,
             )
@@ -201,6 +242,7 @@ def _log_call(
     response: str | None,
     status: str = "success",
     error: str | None = None,
+    model: str | None = None,
 ) -> None:
     """Append a record of this call (success or failure) to a dated trace file."""
     timestamp = datetime.now(timezone.utc).isoformat()
@@ -210,7 +252,7 @@ def _log_call(
 
     record = {
         "timestamp_utc": timestamp,
-        "model": MODEL_NAME,
+        "model": model or MODEL_NAME,
         "prompt_version": prompt_version,
         "status": status,          # "success" or "failed"
         "prompt": safe_prompt,
