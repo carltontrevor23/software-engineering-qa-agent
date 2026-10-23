@@ -25,6 +25,7 @@ PROVIDERS = ("groq", "gemini", "scripted")
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
 REQUEST_TIMEOUT_SECONDS = 60
+GROQ_MAX_TOKENS = 8000
 
 
 class ModelConfigError(RuntimeError):
@@ -81,7 +82,7 @@ def model_label(provider: Optional[str] = None) -> str:
     return "scripted"
 
 
-def get_chat_model(provider: Optional[str] = None) -> BaseChatModel:
+def get_chat_model(provider: Optional[str] = None, reasoning_effort: Optional[str] = None) -> BaseChatModel:
     name = provider_name(provider)
     if name == "scripted":
         return ScriptedChatModel()
@@ -92,10 +93,15 @@ def get_chat_model(provider: Optional[str] = None) -> BaseChatModel:
             )
         from langchain_groq import ChatGroq
 
+        extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
         return ChatGroq(
             model=os.getenv("GROQ_MODEL", DEFAULT_GROQ_MODEL),
             timeout=REQUEST_TIMEOUT_SECONDS,
             max_retries=0,  # retries are handled by ModelRetryMiddleware
+            # The default cap is 2048 tokens, and a reasoning model can spend all of it thinking
+            # and return an empty reply, so leave room for the answer itself.
+            max_tokens=GROQ_MAX_TOKENS,
+            **extra,
         )
     if not os.getenv("GEMINI_API_KEY"):
         raise ModelConfigError(

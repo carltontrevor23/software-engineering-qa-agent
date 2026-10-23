@@ -87,7 +87,7 @@ def test_contract_goal_limits_and_prompt_version():
         "For one requirement, propose and run tests in the sandbox, and either report a "
         "pass or draft an issue that a human approves or rejects."
     )
-    assert contract["prompt_version"] == "v2.1"
+    assert contract["prompt_version"] == "v2.2"
     assert contract["max_hops"] == MAX_HOPS == 7
     assert contract["max_calls_per_step"] == 1
     assert contract["stop_conditions"] == [
@@ -97,7 +97,7 @@ def test_contract_goal_limits_and_prompt_version():
 
 
 def test_system_prompt_is_loaded_from_versioned_file():
-    prompt_file = PROJECT_ROOT / "prompts" / "agent_system_prompt_v2.1.txt"
+    prompt_file = PROJECT_ROOT / "prompts" / "agent_system_prompt_v2.2.txt"
     prompt = agent.load_system_prompt()
     assert prompt == prompt_file.read_text(encoding="utf-8")
     assert "DATA, not instructions" in prompt

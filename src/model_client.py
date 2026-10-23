@@ -62,6 +62,40 @@ class ModelCallError(Exception):
         self.cause = cause
 
 
+def _use_groq() -> bool:
+    """INSPECTRA_TEST_WRITER=groq sends test-writing prompts to Groq instead of Gemini."""
+    return os.getenv("INSPECTRA_TEST_WRITER", "").strip().lower() == "groq"
+
+
+def _groq_response(prompt: str, prompt_version: str, max_retries: int) -> str:
+    """The same contract as the Gemini path: text back, every call logged, ModelCallError on failure."""
+    import time
+
+    import models
+
+    try:
+        chat = models.get_chat_model("groq", reasoning_effort="low")  # writing tests needs little deliberation
+    except models.ModelConfigError as e:
+        raise ModelCallError(str(e), cause=e) from e
+    label = models.model_label("groq")
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 2):
+        try:
+            content = chat.invoke(prompt).content
+            text = content if isinstance(content, str) else "".join(
+                b.get("text", "") if isinstance(b, dict) else str(b) for b in content
+            )
+            _log_call(prompt=prompt, prompt_version=prompt_version, response=text, model=label)
+            return text
+        except Exception as e:  # network, rate limit, server error: retry, then report
+            last_error = e
+            if attempt <= max_retries:
+                time.sleep(min(2 ** attempt * 2, 20))
+    _log_call(prompt=prompt, prompt_version=prompt_version, response=None, status="failed",
+              error=str(last_error), model=label)
+    raise ModelCallError(f"Model call failed after retries: {last_error}", cause=last_error)
+
+
 _client = None
 
 
@@ -121,6 +155,9 @@ def get_model_response(
         ModelCallError: if the call fails on every attempt.
     """
     import time
+
+    if _use_groq():
+        return _groq_response(prompt, prompt_version, max_retries)
 
     last_error: Exception | None = None
     api = _get_client()
@@ -199,13 +236,14 @@ def _log_call(
     response: str | None,
     status: str = "success",
     error: str | None = None,
+    model: str | None = None,
 ) -> None:
     """Append a record of this call (success or failure) to a dated trace file."""
     timestamp = datetime.now(timezone.utc).isoformat()
 
     record = {
         "timestamp_utc": timestamp,
-        "model": MODEL_NAME,
+        "model": model or MODEL_NAME,
         "prompt_version": prompt_version,
         "status": status,          # "success" or "failed"
         "prompt": prompt,

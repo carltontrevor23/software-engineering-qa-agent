@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inspectra"
+version = "0.8.0"
+description = "Inspectra: a QA agent that checks requirements against code, with human approval for changes."
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+# The code is run from the repository folders (see studio/graph.py), not installed as a package.
+# This file exists so that `langgraph build` / a LangGraph deployment treats the repository as one
+# project and installs requirements.txt (a plain folder with a top-level src/ is refused).
+[tool.setuptools]
+packages = []
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

@@ -36,7 +36,7 @@ from guard_middleware import (
 from models import get_chat_model, model_label
 
 # Versioned agent prompt (Week 5): the rules live in prompts/, not in code.
-PROMPT_VERSION = "v2.1"
+PROMPT_VERSION = "v2.2"
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / f"agent_system_prompt_{PROMPT_VERSION}.txt"
 
 AGENT_CONTRACT = {

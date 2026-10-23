@@ -1,0 +1,21 @@
+# Keep secrets and local state out of the deployment image.
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+.git/
+**/__pycache__/
+*.pyc
+.langgraph_api/
+.pytest_cache/
+
+# Runtime output and local history (created on demand in the container)
+data/
+evidence/
+sandbox/generated/
+
+# Not needed to run the agent
+tests/
+skills/
+skills.md

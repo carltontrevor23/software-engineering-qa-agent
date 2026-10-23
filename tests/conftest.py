@@ -8,6 +8,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+# The tests run against the bundled sample project, whatever the developer's .env selects.
+# Empty values count as unset, and python-dotenv does not override variables that already exist.
+for _name in ("INSPECTRA_REQUIREMENTS_DIR", "INSPECTRA_CODE_DIR", "INSPECTRA_CODE_MODULES", "INSPECTRA_TEST_WRITER"):
+    os.environ[_name] = ""
+
 # Same module object that src/guard_middleware.py gets via `from memory import ...`.
 import memory
 

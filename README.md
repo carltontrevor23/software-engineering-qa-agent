@@ -22,7 +22,7 @@ edit the SUT source.
    ```
 2. **Install dependencies**
    ```
-   pip install -r requirements.txt
+   pip install -r requirements-dev.txt
    ```
 3. **Configure `.env`** (never commit it; it is git-ignored)
    ```
@@ -132,6 +132,33 @@ Limits: one project per server (restart after changing `.env`); only `.md` requi
 code is read from a local folder (no GitHub or pull-request source yet); generated tests may
 import only the standard test libraries, `requests` and the project's own packages. The offline
 graph and `--planted-bug` demo always use the bundled sample.
+
+## Deploying (LangSmith Deployment)
+
+Check the build locally first (Docker must be running; on Windows set `PYTHONUTF8=1` for the CLI):
+
+```
+venv\Scripts\langgraph build -t inspectra
+```
+
+Then, with the repository on GitHub: LangSmith -> **Deployments** -> **New deployment** -> pick the
+repository and branch, config file `langgraph.json`. Set these **environment variables in the
+deployment** (never in git; `.dockerignore` keeps `.env` out of the image):
+
+| Variable | Why |
+|---|---|
+| `GROQ_API_KEY` | the default model (or set `INSPECTRA_MODEL=gemini`) |
+| `GEMINI_API_KEY` | the test-writing step (`propose_tests`, `refine_tests`), unless `INSPECTRA_TEST_WRITER=groq` |
+| `INSPECTRA_TEST_WRITER` | optional: `groq` writes the tests with Groq instead of Gemini (then `GEMINI_API_KEY` is not needed) |
+| `APPROVAL_SECRET_KEY` | any long random string; signs the approval tokens |
+| `GITHUB_TOKEN`, `GITHUB_REPO` | optional: file approved issues on GitHub instead of locally |
+| `INSPECTRA_REQUIREMENTS_DIR`, `INSPECTRA_CODE_DIR` | optional: the project to check (the bundled sample by default) |
+
+Then open the deployment in Studio and run the same checks as locally. Know the limits before sharing the URL:
+- The container's disk is temporary: generated tests, issue drafts and the case history are lost on restart.
+- Keep the deployment private (it requires your LangSmith API key). Generated tests run as the server's own user, and the
+  checker that screens them can still be bypassed; do not point it at untrusted users or put unrelated secrets in its environment.
+- The offline graphs are for demos; `inspectra` is the one to deploy.
 
 ## Running the MCP server
 

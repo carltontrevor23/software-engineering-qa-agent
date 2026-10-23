@@ -46,8 +46,9 @@ def is_high_impact(tool_name: str) -> bool:
 # 2. Token Management (HMAC-SHA256 Signed Single-Use Tokens)
 # =====================================================================
 
-DEFAULT_SECRET = "qa-agent-approval-secret-key-2026"
-APPROVAL_SECRET_KEY = os.getenv("APPROVAL_SECRET_KEY", DEFAULT_SECRET)
+# Tokens are minted and checked inside one process and live for two minutes, so when no key is
+# configured a random per-process key is used. There is no built-in key in the source.
+APPROVAL_SECRET_KEY = os.getenv("APPROVAL_SECRET_KEY") or secrets.token_hex(32)
 
 # In-memory store of consumed nonces to prevent token replay attacks
 _CONSUMED_NONCES: set[str] = set()
