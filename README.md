@@ -12,6 +12,64 @@ The system under test is a small subscription service in [`sut/`](sut/). The age
 never operates it. The agent cannot merge, deploy, read secrets, run arbitrary shell commands, or
 edit the SUT source.
 
+## Quick start: run the agent in LangGraph Studio
+
+Run these from the project folder (the one that contains `langgraph.json`). Windows commands are
+shown first; on macOS or Linux use `source venv/bin/activate` and `cp`.
+
+1. **Activate the virtual environment** (create it once with `python -m venv venv`, then
+   `pip install -r requirements-dev.txt`):
+   ```
+   venv\Scripts\activate
+   ```
+2. **Copy the environment file and add your keys:**
+   ```
+   copy .env.example .env
+   ```
+   Open `.env` and set at least `GROQ_API_KEY` (free at https://console.groq.com). Add
+   `INSPECTRA_TEST_WRITER=groq` to write the tests with Groq too, so no Gemini key is needed.
+   `.env` is git-ignored: never commit it. The offline graphs need no keys at all.
+3. **Start the LangGraph server:**
+   ```
+   langgraph dev --no-reload
+   ```
+   Wait for the line saying the server is ready on `http://127.0.0.1:2024`. Studio usually opens in
+   the browser; if not, open https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024 .
+   Restart this command after every change to `.env`.
+4. **In Studio:** pick a graph (`inspectra_offline` for a rehearsal with no keys, `inspectra` for the
+   live agent), click **+** for a new thread, and send `Check REQ-2.1 (Tier Upgrades) against the code.`
+5. **If the agent pauses for approval,** answer in the box that appears (open the **Graph** view and
+   use the RAW tab): `{"decisions": [{"type": "approve"}]}` to approve, or
+   `{"decisions": [{"type": "reject", "message": "No."}]}` to reject.
+
+### What happens when you run `langgraph dev`
+
+1. **The command reads `langgraph.json`.** It lists the three graphs and points each one at a
+   function in `studio/graph.py`. It also loads `.env` into the server's environment.
+2. **It starts a local API server on port 2024.** Runs, threads and their saved state are kept in
+   memory (the `.langgraph_api/` folder holds a local copy). Nothing is deployed anywhere. Studio is
+   only a web page that connects to this local server from your browser.
+3. **When you pick a graph and send a message,** the server calls that graph's function. It builds
+   the agent: the model (`INSPECTRA_MODEL`), the eight tools and the guard and approval middleware
+   (`src/agent.py`), and the graph is created from them.
+4. **Your message travels through the graph one node at a time,** and Studio shows each step:
+
+   | Node | What it does |
+   |---|---|
+   | `InspectraGuard.before_agent` | checks and cleans your request; starts a fresh run, or continues a finished one for a follow-up |
+   | `InspectraGuard.before_model` | stops the run when the 7-step budget is used up or the human rejected an action |
+   | `model` | the AI model picks the next tool (one at a time) or writes the final answer |
+   | `ApprovalGate.after_model` | pauses the run for a human when the model asks for `file_issue` or `save_test_to_suite` |
+   | `InspectraGuard.after_model` | counts the step; on a final answer, redacts secrets and withholds claims no test result supports |
+   | `tools` | runs the chosen tool after the phase and file checks; the result updates the workflow state |
+
+   The loop repeats (`before_model` -> `model` -> `tools` ...) until the model answers or a stop
+   condition is reached. The state panel shows `phase`, `test_outcome` and `stop_reason` after each step.
+5. **A pause is an interrupt.** The server saves the whole state under the thread and waits. Your
+   approve or reject reply resumes the same run from where it stopped. Nothing continues without it.
+6. **The thread keeps its history,** which is what lets a follow-up ("Save those tests") continue
+   the previous run. Use a new thread (**+**) for each separate demo.
+
 ## Setup
 
 1. **Create and activate a virtual environment**
@@ -26,7 +84,7 @@ edit the SUT source.
    ```
 3. **Configure `.env`** (never commit it; it is git-ignored)
    ```
-   cp .env.example .env
+   cp .env.example .env     # Windows: copy .env.example .env
    ```
    - `INSPECTRA_MODEL`: which model drives the agent: `groq` (default), `gemini` or `scripted`
      (no key, no network).
@@ -261,7 +319,7 @@ The remaining architectural and operational limitations are:
    - `approval.py` tracks consumed token nonces (`_CONSUMED_NONCES`) in process memory, and
      `memory.py` uses a `threading.Lock` (thread-safe within one process, not across separate OS
      processes) with manual/scheduled invocation of `purge_expired_records()`.
-7. **Free-Tier Gemini Quota & Rate-Limit Latency (`src/model_client.py`, `src/tool_calling.py`)**
+7. **Free-Tier Gemini Quota & Rate-Limit Latency (`src/model_client.py`)**
    - Free-tier Gemini limits (~20 requests/day per model) constrain back-to-back live runs and
      introduce 32–65 s retry delays when `429 RESOURCE_EXHAUSTED` or `503` responses occur.
 
