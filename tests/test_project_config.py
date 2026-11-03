@@ -128,6 +128,14 @@ def test_requirements_come_from_the_configured_folder(other_project):
     assert found["results"][0]["requirement_id"] == "REQ-1.1"
 
 
+def test_a_named_requirement_is_found_by_id_even_in_a_one_requirement_folder(other_project):
+    # BM25 alone scores a one-file corpus below its minimum, so ids are looked up directly.
+    found = qa_tools.search_requirements("REQ-1.1 (Late Fees)")
+    assert [(r["requirement_id"], r["match"]) for r in found["results"]] == [("REQ-1.1", "exact_id")]
+    missing = qa_tools.search_requirements("REQ-9.9")
+    assert missing["results"] == [] and missing["note"] == "NO_RELEVANT_REQUIREMENTS_FOUND"
+
+
 def test_module_description_shows_source_and_the_exact_import_line(other_project):
     text, first = project_config.module_description(sandbox.SUT_DIR)
     assert first == "library.fees"

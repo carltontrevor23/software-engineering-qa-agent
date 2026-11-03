@@ -45,6 +45,8 @@ GITHUB_API = "https://api.github.com/repos/{repo}/issues"
 GITHUB_LABELS = ["inspectra-qa"]
 GITHUB_TIMEOUT_SECONDS = 15
 
+_REQ_ID_IN_QUERY_RE = re.compile(r"REQ-\d+(?:\.\d+)*", re.I)
+
 _SECTION_RE = re.compile(r"^##\s+Section\s+(\d+(?:\.\d+)*)\s*:\s*(.+?)\s*$")
 _CODE_BLOCK_RE = re.compile(r"```python\s*\n(.*?)```", re.DOTALL)
 
@@ -139,11 +141,22 @@ def requirement_id_from_args(args: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------
 
 def search_requirements(query: str, top_k: int = 3) -> Dict[str, Any]:
-    """BM25 search over docs/requirements (Week 3 RAG)."""
+    """Find requirements: an exact REQ-X.Y id in the query is looked up directly; otherwise BM25
+    search over the requirements folder (Week 3 RAG)."""
     invalid = guardrails.check_query(query, top_k)
     if invalid:
         guardrails.record("input_rejected", tool="search_requirements", reason=invalid)
         return {"status": "error", "error": invalid}
+    # BM25 scores depend on corpus size: a small requirements folder (one file) can never reach the
+    # minimum score, so a named requirement that exists would be reported as not found.
+    by_id = [load_requirement(rid.upper()) for rid in dict.fromkeys(_REQ_ID_IN_QUERY_RE.findall(query))]
+    exact = [
+        {"requirement_id": req["requirement_id"], "source_file": req["source_file"],
+         "match": "exact_id", "text": req["text"]}
+        for req in by_id if req["status"] == "success"
+    ]
+    if exact:
+        return {"status": "success", "results": exact[:top_k]}
     try:
         retriever = build_rag_pipeline(str(REQUIREMENTS_DIR))
     except FileNotFoundError:
