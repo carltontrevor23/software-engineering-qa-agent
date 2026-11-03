@@ -9,12 +9,14 @@ Building the graph imports modules and reads the prompt file, which are blocking
 each factory does that work in a worker thread instead of on the server's event loop.
 
   make_graph          the live agent (INSPECTRA_MODEL: groq | gemini | scripted)
-  make_offline_graph  scripted model + fixture tests + planted bug; no network, no quota
-  make_offline_pass_graph  the same without the bug: tests pass, so follow-ups (save, refine,
-                      ask about the code) can be tried offline
+  make_offline_graph  scripted model + fixture tests; no network, no quota. The code under test has
+                      a planted bug by default (tests fail, an issue is drafted, a human approves
+                      or rejects). Set INSPECTRA_OFFLINE_BUG=0 and restart the server for the
+                      passing case, where the follow-ups (save, refine, ask about the code) work.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -33,11 +35,16 @@ def _build_live():
     return build_agent()
 
 
-def _build_offline(planted_bug: bool = True):
+def _offline_bug() -> bool:
+    """The offline code under test has a planted bug unless INSPECTRA_OFFLINE_BUG is 0/false/no/off."""
+    return os.getenv("INSPECTRA_OFFLINE_BUG", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _build_offline():
     _use_src()
     from offline import build_offline_agent
 
-    return build_offline_agent(planted_bug=planted_bug)
+    return build_offline_agent(planted_bug=_offline_bug())
 
 
 async def make_graph(config=None):
@@ -47,6 +54,3 @@ async def make_graph(config=None):
 async def make_offline_graph(config=None):
     return await asyncio.to_thread(_build_offline)
 
-
-async def make_offline_pass_graph(config=None):
-    return await asyncio.to_thread(_build_offline, False)

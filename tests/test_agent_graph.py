@@ -152,7 +152,7 @@ def _load_studio_graph():
 
 def test_langgraph_json_points_at_real_factories():
     config = json.loads((PROJECT_ROOT / "langgraph.json").read_text(encoding="utf-8"))
-    assert set(config["graphs"]) == {"inspectra", "inspectra_offline", "inspectra_offline_pass"}
+    assert set(config["graphs"]) == {"inspectra", "inspectra_offline"}
     module = _load_studio_graph()
     for target in config["graphs"].values():
         path, factory = target.rsplit(":", 1)
@@ -167,7 +167,17 @@ def test_studio_factories_build_without_any_api_key(monkeypatch):
     module = _load_studio_graph()
     assert asyncio.run(module.make_graph()) is not None
     assert asyncio.run(module.make_offline_graph()) is not None
-    assert asyncio.run(module.make_offline_pass_graph()) is not None
+
+
+def test_offline_graph_has_the_planted_bug_unless_switched_off(monkeypatch):
+    module = _load_studio_graph()
+    monkeypatch.delenv("INSPECTRA_OFFLINE_BUG", raising=False)
+    assert module._offline_bug() is True
+    for value in ("0", "false", "No", "off"):
+        monkeypatch.setenv("INSPECTRA_OFFLINE_BUG", value)
+        assert module._offline_bug() is False
+    monkeypatch.setenv("INSPECTRA_OFFLINE_BUG", "1")
+    assert module._offline_bug() is True
 
 
 def test_live_studio_graph_fails_with_a_clear_message_not_an_import_error(monkeypatch):

@@ -12,6 +12,9 @@ The system under test is a small subscription service in [`sut/`](sut/). The age
 never operates it. The agent cannot merge, deploy, read secrets, run arbitrary shell commands, or
 edit the SUT source.
 
+**New to the project?** Read [INSPECTRA_WALKTHROUGH.md](INSPECTRA_WALKTHROUGH.md): a step-by-step tour
+of how one run flows through the code, file by file, with a talk track for presenting it.
+
 ## Quick start: run the agent in LangGraph Studio
 
 Run these from the project folder (the one that contains `langgraph.json`). Windows commands are
@@ -44,7 +47,7 @@ shown first; on macOS or Linux use `source venv/bin/activate` and `cp`.
 
 ### What happens when you run `langgraph dev`
 
-1. **The command reads `langgraph.json`.** It lists the three graphs and points each one at a
+1. **The command reads `langgraph.json`.** It lists the two graphs and points each one at a
    function in `studio/graph.py`. It also loads `.env` into the server's environment.
 2. **It starts a local API server on port 2024.** Runs, threads and their saved state are kept in
    memory (the `.langgraph_api/` folder holds a local copy). Nothing is deployed anywhere. Studio is
@@ -117,13 +120,16 @@ Then open https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024 . (K
 the agent writes generated tests and issue drafts inside the project, and the file watcher would
 restart the server in the middle of a run.)
 
-Three graphs are served (see [`langgraph.json`](langgraph.json)):
+Two graphs are served (see [`langgraph.json`](langgraph.json)):
 
 | Graph | Model | Use it for |
 |---|---|---|
 | `inspectra_offline` | scripted, with fixture tests and a **planted bug** | rehearsals and the demo: no network, no quota |
-| `inspectra_offline_pass` | scripted, fixture tests, **no bug** (tests pass) | trying the follow-ups below offline |
 | `inspectra` | `INSPECTRA_MODEL` (Groq by default) | the live agent |
+
+The offline graph has a planted bug by default, so the tests fail and you can show the issue
+draft and the approval step. To see the passing case and try the follow-ups ("Save those tests",
+"Add a test for ...") offline, put `INSPECTRA_OFFLINE_BUG=0` in `.env` and restart `langgraph dev`.
 
 Send a message such as `Check REQ-2.1 (Tier Upgrades) against the code.` The state panel shows the
 workflow fields (`phase`, `test_outcome`, `stop_reason`, ...) after every step. When the agent wants
@@ -235,11 +241,12 @@ sut/                          # SYSTEM UNDER TEST (the agent tests this, never e
   subscription_service/       #   subscription_manager.py
   tests/                      #   human-written baseline tests (+ approved generated tests)
 langgraph.json                # LangGraph Studio config: graphs inspectra, inspectra_offline
+INSPECTRA_WALKTHROUGH.md      # step-by-step tour of the codebase, for explaining how a run works
 studio/graph.py               # async graph factories served by Studio
 skills.md, skills/            # coding-agent skills for the Week 8 migration (see skills.md)
 src/
   agent.py                    # create_agent assembly, AGENT_CONTRACT, CLI (build_agent, run)
-  agent_tools.py              # the six approved tools (the allow-list)
+  agent_tools.py              # the eight approved tools (the allow-list)
   agent_state.py              # InspectraState: messages + workflow fields
   guard_middleware.py         # request validation, phase guard, state updates, answer checks, approval gate
   models.py                   # model factory: groq | gemini | scripted (chosen at build time)
